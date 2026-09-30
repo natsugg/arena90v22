@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Disc3, Radio, Award } from 'lucide-react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { i18n } from '../../lib/i18n';
+import { extractYouTubeId } from '../../lib/youtube';
 import {
   INITIAL_CRITERIA_SCORES,
   INITIAL_LIVE_SESSION,
@@ -28,6 +29,7 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
   const [session, setSession] = useState<LiveSession>(() => INITIAL_LIVE_SESSION);
   const [fallbackTrack, setFallbackTrack] = useState<Track | null>(null);
   const [imgError, setImgError] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   // 1. სრულიად ავტონომიური, უპირობო პირდაპირი Firestore onSnapshot მოსმენა `live_sessions/current` დოკუმენტზე (ავტორიზაციის გარეშე, OBS CEF-ისთვის)
   useEffect(() => {
@@ -43,6 +45,13 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
             id: snapshot.id,
             activeTrackId: data.activeTrackId || null,
             activeTrackSnapshot: data.activeTrackSnapshot ?? null,
+            youtubeUrl:
+              data.youtubeUrl ?? data.activeTrackSnapshot?.youtubeUrl ?? '',
+            youtubeId:
+              data.youtubeId ?? data.activeTrackSnapshot?.youtubeId ?? '',
+            showVideoInOverlay: Boolean(data.showVideoInOverlay ?? true),
+            isPlaying: Boolean(data.isPlaying ?? true),
+            isMuted: Boolean(data.isMuted ?? false),
             liveExpertDraft: data.liveExpertDraft ?? null,
           });
         }
@@ -137,7 +146,73 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
   const isRevealed = status === 'revealed';
   const snapshot = session?.activeTrackSnapshot ?? null;
   const showOverlay = session?.showObsOverlay ?? true;
+  const showVideoInOverlay = Boolean(session?.showVideoInOverlay ?? true);
   const obsTheme = session?.obsTheme ?? 'dark';
+
+  const rawYoutubeUrl =
+    snapshot?.youtubeUrl ||
+    session?.youtubeUrl ||
+    fallbackTrack?.youtubeUrl ||
+    fallbackTrack?.sourceUrl ||
+    fallbackTrack?.audioUrl ||
+    '';
+
+  const youtubeId =
+    (
+      snapshot?.youtubeId ||
+      session?.youtubeId ||
+      extractYouTubeId(rawYoutubeUrl) ||
+      fallbackTrack?.youtubeId ||
+      ''
+    ).trim() || null;
+
+  const activeTrackKey =
+    snapshot?.id || session?.activeTrackId || fallbackTrack?.id || 'idle';
+  const shouldShowVideo = Boolean(showVideoInOverlay && youtubeId);
+  const isPlaying = Boolean(session?.isPlaying ?? true);
+  const isMuted = Boolean(session?.isMuted ?? false);
+
+  const sendPlayerCommand = (func: string, args: unknown[] = []) => {
+    if (!iframeRef.current?.contentWindow) return;
+    try {
+      iframeRef.current.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func, args }),
+        '*'
+      );
+    } catch {
+      // ignore cross-origin postMessage errors
+    }
+  };
+
+  // რეაქტიული დაკვრა / დაპაუზება გვერდის გადატვირთვის გარეშე
+  useEffect(() => {
+    if (!shouldShowVideo || !youtubeId) return;
+    sendPlayerCommand(isPlaying ? 'playVideo' : 'pauseVideo');
+  }, [isPlaying, shouldShowVideo, youtubeId]);
+
+  // რეაქტიული ხმის ჩართვა / გამორთვა გვერდის გადატვირთვის გარეშე
+  useEffect(() => {
+    if (!shouldShowVideo || !youtubeId) return;
+    sendPlayerCommand(isMuted ? 'mute' : 'unmute');
+  }, [isMuted, shouldShowVideo, youtubeId]);
+
+  // ტრეკის შეცვლისას ან ვიდეოს გამორთვისას ძველი iframe-ის სრული განტვირთვა ფონური პროცესების გარეშე
+  useEffect(() => {
+    const currentIframe = iframeRef.current;
+    return () => {
+      if (currentIframe) {
+        try {
+          currentIframe.contentWindow?.postMessage(
+            JSON.stringify({ event: 'command', func: 'stopVideo', args: [] }),
+            '*'
+          );
+          currentIframe.src = 'about:blank';
+        } catch {
+          // ignore cross-origin cleanup errors
+        }
+      }
+    };
+  }, [activeTrackKey, youtubeId, shouldShowVideo]);
 
   // 3. პირდაპირი მიბმა სტრიმერის დრაფტზე (`session.liveExpertDraft`) ყოველ სნაპშოტზე
   const displayedScores: CriteriaScores =
@@ -226,21 +301,45 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
           </div>
         </div>
 
-        {/* ტრეკის ბარათი: გარეკანი, სახელწოდება, არტისტი და ქულების შეჯამება */}
-        <div className="flex items-center gap-4 mb-6">
-          <div className="relative w-20 h-20 rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shrink-0 flex items-center justify-center">
-            {!imgError && trackCover ? (
-              <img
-                src={trackCover}
-                alt={trackTitle}
-                referrerPolicy="no-referrer"
-                onError={() => setImgError(true)}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <Disc3 className="w-9 h-9 text-amber-400" />
-            )}
+        {/* ადაპტური YouTube ვიდეო-პლეერი OBS CEF-ისთვის (თუ ჩართულია showVideoInOverlay და არსებობს youtubeId) */}
+        {shouldShowVideo && youtubeId && (
+          <div
+            key={`obs_video_container_${activeTrackKey}_${youtubeId}`}
+            className="relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-zinc-800/90 mb-5 pointer-events-auto"
+          >
+            <iframe
+              ref={iframeRef}
+              key={`obs_youtube_iframe_${activeTrackKey}_${youtubeId}`}
+              src={`https://www.youtube.com/embed/${youtubeId}?autoplay=1&controls=1&mute=${session?.isMuted ? 1 : 0}&enablejsapi=1&rel=0`}
+              title={trackTitle}
+              allow="autoplay; encrypted-media; clipboard-write"
+              allowFullScreen
+              onLoad={() => {
+                sendPlayerCommand(isMuted ? 'mute' : 'unmute');
+                sendPlayerCommand(isPlaying ? 'playVideo' : 'pauseVideo');
+              }}
+              className="w-full h-full border-0 pointer-events-auto"
+            />
           </div>
+        )}
+
+        {/* ტრეკის ბარათი: გარეკანი (თუ ვიდეო გამორთულია ან არ არსებობს), სახელწოდება, არტისტი და ქულების შეჯამება */}
+        <div className="flex items-center gap-4 mb-6">
+          {!shouldShowVideo && (
+            <div className="relative w-20 h-20 rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shrink-0 flex items-center justify-center">
+              {!imgError && trackCover ? (
+                <img
+                  src={trackCover}
+                  alt={trackTitle}
+                  referrerPolicy="no-referrer"
+                  onError={() => setImgError(true)}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <Disc3 className="w-9 h-9 text-amber-400" />
+              )}
+            </div>
+          )}
 
           <div className="min-w-0 flex-1">
             <h2 className="text-lg font-bold text-zinc-100 truncate">

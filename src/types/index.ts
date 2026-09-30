@@ -168,6 +168,8 @@ export interface Track {
   coverUrl: string;
   audioUrl: string;
   sourceUrl?: string;
+  youtubeUrl?: string;
+  youtubeId?: string;
   genre?: string;
   duration?: number;
   submittedBy: string;
@@ -179,7 +181,9 @@ export interface Track {
   expertTotalScore?: number | null;
   communityScore: CriteriaScores | null;
   communityTotalScore?: number | null;
+  peopleScore?: number | null;
   communityVotesCount: number;
+  reviewsCount?: number;
   metaScore: number | null;
   createdAt: FirestoreTimestamp;
   updatedAt: FirestoreTimestamp;
@@ -269,6 +273,24 @@ export type LiveStreamStatus =
 export type ObsTheme = 'dark' | 'neon' | 'minimal' | 'compact';
 
 /**
+ * აქტიური ტრეკის სნაპშოტი OBS ოვერლეისა და სტუდიის სინქრონიზაციისთვის (`activeTrackSnapshot`).
+ */
+export interface TrackSnapshot {
+  id: string;
+  title: string;
+  artist: string;
+  coverUrl: string;
+  genre?: string;
+  youtubeUrl?: string;
+  youtubeId?: string;
+  expertScore: CriteriaScores | null;
+  expertTotalScore: number | null;
+  communityTotalScore: number | null;
+  communityVotesCount: number;
+  metaScore: number | null;
+}
+
+/**
  * აქტიური სტრიმის სესია (`/live_sessions/{sessionId}`).
  */
 export interface LiveSession {
@@ -276,22 +298,15 @@ export interface LiveSession {
   isLive: boolean;
   streamStatus: LiveStreamStatus;
   activeTrackId: string | null;
-  activeTrackSnapshot?: {
-    id: string;
-    title: string;
-    artist: string;
-    coverUrl: string;
-    genre?: string;
-    expertScore: CriteriaScores | null;
-    expertTotalScore: number | null;
-    communityTotalScore: number | null;
-    communityVotesCount: number;
-    metaScore: number | null;
-  } | null;
+  activeTrackSnapshot?: TrackSnapshot | null;
+  youtubeUrl?: string;
+  youtubeId?: string;
+  showVideoInOverlay?: boolean;
   hostId: string;
   title: string;
   votingOpen: boolean;
   isPlaying: boolean;
+  isMuted?: boolean;
   playbackPosition: number;
   showObsOverlay: boolean;
   obsTheme: ObsTheme;
@@ -626,19 +641,27 @@ export function computeUpdatedCommunityScores(
  * რეცენზიის წაშლის შემდეგ ხელახლა ითვლის ტრეკის შეწონილ communityScore-ს დარჩენილი რეცენზიებიდან.
  */
 export function recalculateCommunityScoresFromReviews(
-  remainingReviews: TrackReview[],
+  remainingReviews: Array<{
+    scores: CriteriaScores;
+    voteWeight?: number;
+    totalScore?: number;
+  }>,
   expertScore: CriteriaScores | null
 ): {
   communityScore: CriteriaScores | null;
   communityTotalScore: number | null;
+  peopleScore: number | null;
   communityVotesCount: number;
+  reviewsCount: number;
   metaScore: number | null;
 } {
   if (remainingReviews.length === 0) {
     return {
       communityScore: null,
       communityTotalScore: null,
+      peopleScore: null,
       communityVotesCount: 0,
+      reviewsCount: 0,
       metaScore: calculateMetaScore(expertScore, null),
     };
   }
@@ -678,7 +701,9 @@ export function recalculateCommunityScoresFromReviews(
   return {
     communityScore,
     communityTotalScore,
+    peopleScore: communityTotalScore,
     communityVotesCount,
+    reviewsCount: communityVotesCount,
     metaScore,
   };
 }

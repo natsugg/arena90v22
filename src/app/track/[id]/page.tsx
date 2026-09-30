@@ -16,6 +16,7 @@ import {
 import {
   collection,
   doc,
+  getDocs,
   deleteDoc,
   updateDoc,
   onSnapshot,
@@ -299,18 +300,40 @@ export default function TrackDetailPage({
     try {
       await deleteDoc(doc(db, 'tracks', trackId, 'reviews', reviewId));
 
-      const remainingReviews = trackReviews.filter((r) => r.id !== reviewId);
-      setTrackReviews(remainingReviews);
+      // წამოვიღოთ დარჩენილი რეცენზიების დოკუმენტები პირდაპირ Firestore-ის `tracks/{id}/reviews` ქვეკოლექციიდან
+      const remainingSnapshot = await getDocs(
+        collection(db, 'tracks', trackId, 'reviews')
+      );
+      const remainingDocs = remainingSnapshot.docs
+        .filter((d) => d.id !== reviewId)
+        .map((d) => {
+          const data = d.data();
+          return {
+            scores: (data.scores as CriteriaScores) || {
+              lyrics: 8.0,
+              flow: 8.0,
+              production: 8.0,
+              identity: 8.0,
+              vibe: 8.0,
+            },
+            voteWeight:
+              typeof data.voteWeight === 'number' ? data.voteWeight : 1.0,
+            totalScore:
+              typeof data.totalScore === 'number' ? data.totalScore : 8.0,
+          };
+        });
 
       const recalculated = recalculateCommunityScoresFromReviews(
-        remainingReviews,
+        remainingDocs,
         track.expertScore
       );
 
       await updateDoc(doc(db, 'tracks', trackId), {
         communityScore: recalculated.communityScore,
         communityTotalScore: recalculated.communityTotalScore,
+        peopleScore: recalculated.peopleScore,
         communityVotesCount: recalculated.communityVotesCount,
+        reviewsCount: recalculated.reviewsCount,
         metaScore: recalculated.metaScore,
         updatedAt: serverTimestamp(),
       });

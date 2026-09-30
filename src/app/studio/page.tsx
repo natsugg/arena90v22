@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Disc3,
   Plus,
@@ -14,6 +14,10 @@ import {
   Link2,
   Shield,
   Trash2,
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import {
   collection,
@@ -84,14 +88,42 @@ export default function StudioPage({
     inQueueTracks,
     userProfile,
     currentUserProfile,
+    isPlaying,
+    isMuted,
+    showVideoInOverlay,
     updateDraftScores,
     updateStreamStatus,
     lockInVerdict,
     addAndActivateTrack,
     launchTrackOnAir,
     updateCommunityPrediction,
+    toggleShowVideoInOverlay,
+    togglePlayback,
+    toggleMute,
     updateObsSettings,
   } = useLiveSession('current');
+
+  const studioIframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  const sendStudioPlayerCommand = (func: string, args: unknown[] = []) => {
+    if (!studioIframeRef.current?.contentWindow) return;
+    try {
+      studioIframeRef.current.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func, args }),
+        '*'
+      );
+    } catch {
+      // ignore cross-origin postMessage errors
+    }
+  };
+
+  useEffect(() => {
+    sendStudioPlayerCommand(isPlaying ? 'playVideo' : 'pauseVideo');
+  }, [isPlaying, activeTrack?.id]);
+
+  useEffect(() => {
+    sendStudioPlayerCommand(isMuted ? 'mute' : 'unmute');
+  }, [isMuted, activeTrack?.id]);
 
   const activeUserProfile = currentUserProfile ?? userProfile;
   const isAdmin = activeUserProfile?.role === 'admin';
@@ -301,6 +333,7 @@ export default function StudioPage({
       artist: artistInput,
       coverUrl: coverUrlInput || PRESET_COVERS.vinyl,
       genre: genreInput,
+      youtubeUrl: youtubeUrlInput.trim() || undefined,
       audioUrl: youtubeUrlInput.trim() || undefined,
       sourceUrl: youtubeUrlInput.trim() || undefined,
     });
@@ -459,8 +492,56 @@ export default function StudioPage({
               </div>
             </div>
 
-            {/* OBS ხილვადობა და თემის გადამრთველი */}
+            {/* დაკვრის პულტი (Play/Pause, Mute/Unmute), OBS ხილვადობა, ვიდეოს ჩვენება ოვერლეიზე და თემის გადამრთველი */}
             <div className="flex flex-wrap items-center gap-2 text-xs">
+              {/* ღილაკი Play/Pause (დაპაუზება / დაკვრა) */}
+              <button
+                type="button"
+                onClick={() => void togglePlayback(!isPlaying)}
+                title={i18n.ui.playPauseToggle}
+                aria-label={i18n.ui.playPauseToggle}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  isPlaying
+                    ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                    : 'border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'
+                }`}
+              >
+                {isPlaying ? (
+                  <Pause className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <Play className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>{i18n.ui.playPauseToggle}:</span>
+                <span className="font-semibold">
+                  {isPlaying ? i18n.ui.pauseTrack : i18n.ui.playTrack}
+                </span>
+              </button>
+
+              {/* ტუმბლერი Mute/Unmute (ხმის ჩართვა / გამორთვა) */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!isMuted}
+                onClick={() => void toggleMute(!isMuted)}
+                title={i18n.ui.muteUnmuteToggle}
+                aria-label={i18n.ui.muteUnmuteToggle}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  !isMuted
+                    ? 'border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
+                    : 'border-rose-500/40 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+                }`}
+              >
+                {isMuted ? (
+                  <VolumeX className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <Volume2 className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>{i18n.ui.muteUnmuteToggle}:</span>
+                <span className="font-semibold">
+                  {isMuted ? i18n.ui.unmuteAudio : i18n.ui.muteAudio}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() =>
@@ -468,7 +549,7 @@ export default function StudioPage({
                     showObsOverlay: !(session?.showObsOverlay ?? true),
                   })
                 }
-                className={`px-2.5 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer ${
+                className={`px-2.5 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer whitespace-nowrap ${
                   (session?.showObsOverlay ?? true)
                     ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
                     : 'border-zinc-800 bg-[#0B0F17] text-zinc-400 hover:text-zinc-200'
@@ -476,6 +557,26 @@ export default function StudioPage({
               >
                 {i18n.ui.obsOverlayVisibility}:{' '}
                 {(session?.showObsOverlay ?? true) ? 'ჩართულია' : 'დამალულია'}
+              </button>
+
+              {/* გადამრთველი (Toggle): "ვიდეოს ჩვენება ოვერლეიზე" */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showVideoInOverlay}
+                onClick={() =>
+                  void toggleShowVideoInOverlay(!showVideoInOverlay)
+                }
+                className={`inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  showVideoInOverlay
+                    ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                    : 'border-zinc-800 bg-[#0B0F17] text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span>{i18n.ui.showVideoInOverlay}:</span>
+                <span className="font-semibold">
+                  {showVideoInOverlay ? 'ჩართულია' : 'გამორთულია'}
+                </span>
               </button>
 
               <div className="flex items-center gap-1 p-1 bg-[#0B0F17] border border-zinc-800 rounded-lg">
@@ -508,19 +609,31 @@ export default function StudioPage({
         {/* ჩაშენებული YouTube პლეერი აქტიური ტრეკისთვის სტუდიაში */}
         {activeTrack &&
           (() => {
-            const ytId = extractYouTubeId(
-              activeTrack.sourceUrl || activeTrack.audioUrl || ''
-            );
+            const ytId =
+              activeTrack.youtubeId ||
+              session?.activeTrackSnapshot?.youtubeId ||
+              session?.youtubeId ||
+              extractYouTubeId(
+                activeTrack.youtubeUrl ||
+                  activeTrack.sourceUrl ||
+                  activeTrack.audioUrl ||
+                  ''
+              );
             if (!ytId) return null;
             return (
-              <div className="mt-5 pt-5 border-t border-zinc-800/80">
+              <div
+                key={`studio_player_${activeTrack.id}_${ytId}`}
+                className="mt-5 pt-5 border-t border-zinc-800/80"
+              >
                 <div className="relative w-full overflow-hidden rounded-xl border border-zinc-800 bg-black aspect-video max-h-[300px]">
                   <iframe
-                    src={`https://www.youtube.com/embed/${ytId}?rel=0`}
+                    ref={studioIframeRef}
+                    key={`studio_iframe_${activeTrack.id}_${ytId}`}
+                    src={`https://www.youtube.com/embed/${ytId}?rel=0&enablejsapi=1&controls=1`}
                     title={activeTrack.title}
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                     allowFullScreen
-                    className="w-full h-full border-0"
+                    className="w-full h-full border-0 pointer-events-auto"
                   />
                 </div>
               </div>
@@ -726,7 +839,7 @@ export default function StudioPage({
 
                       <button
                         type="button"
-                        onClick={() => void launchTrackOnAir(track.id)}
+                        onClick={() => void launchTrackOnAir(track)}
                         className={`px-3 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                           isCurrentOnAir && queueTab === 'all'
                             ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/40'

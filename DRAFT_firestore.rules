@@ -102,7 +102,7 @@ service cloud.firestore {
           'genre', 'duration', 'submittedBy', 'submittedByName',
           'isPriority', 'donationAmount', 'status',
           'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
-          'communityVotesCount', 'metaScore', 'createdAt', 'updatedAt'
+          'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore', 'createdAt', 'updatedAt'
         ])
         && data.id == trackId
         && isValidId(data.id)
@@ -126,7 +126,9 @@ service cloud.firestore {
         && (!('expertTotalScore' in data) || data.expertTotalScore == null || (data.expertTotalScore is number && data.expertTotalScore >= 1 && data.expertTotalScore <= 10))
         && (!('communityScore' in data) || data.communityScore == null || isValidCriteriaScores(data.communityScore))
         && (!('communityTotalScore' in data) || data.communityTotalScore == null || (data.communityTotalScore is number && data.communityTotalScore >= 1 && data.communityTotalScore <= 10))
+        && (!('peopleScore' in data) || data.peopleScore == null || (data.peopleScore is number && data.peopleScore >= 1 && data.peopleScore <= 10))
         && data.communityVotesCount is number && data.communityVotesCount >= 0 && data.communityVotesCount <= 1000000
+        && (!('reviewsCount' in data) || data.reviewsCount == null || (data.reviewsCount is number && data.reviewsCount >= 0 && data.reviewsCount <= 1000000))
         && (!('metaScore' in data) || data.metaScore == null || (data.metaScore is number && data.metaScore >= 0 && data.metaScore <= 100))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -317,7 +319,8 @@ service cloud.firestore {
           (
             existing().status in ['in_queue', 'on_air', 'reviewed', 'community_catalog', 'queued', 'playing', 'reviewing']
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore', 'communityVotesCount', 'metaScore', 'updatedAt'
+              'status', 'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
+              'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore', 'updatedAt'
             ])
           ) ||
           // Action 3: Admin / Host full update

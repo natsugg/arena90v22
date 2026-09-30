@@ -138,6 +138,18 @@
           "minLength": 0,
           "maxLength": 500
         },
+        "youtubeUrl": {
+          "type": "string",
+          "description": "YouTube video URL associated with the track.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "youtubeId": {
+          "type": "string",
+          "description": "Extracted YouTube video ID.",
+          "minLength": 0,
+          "maxLength": 64
+        },
         "genre": {
           "type": "string",
           "description": "Musical genre tag.",
@@ -192,9 +204,17 @@
           "type": "number",
           "description": "Calculated weighted total/average score from the community."
         },
+        "peopleScore": {
+          "type": "number",
+          "description": "Weighted average score from community reviews (1-10)."
+        },
         "communityVotesCount": {
           "type": "number",
           "description": "Total number of community votes cast for this track."
+        },
+        "reviewsCount": {
+          "type": "number",
+          "description": "Total number of active reviews in tracks/{id}/reviews."
         },
         "metaScore": {
           "type": "number",
@@ -253,6 +273,22 @@
           "minLength": 0,
           "maxLength": 128
         },
+        "youtubeUrl": {
+          "type": "string",
+          "description": "YouTube video URL of the active track.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "youtubeId": {
+          "type": "string",
+          "description": "Extracted YouTube video ID of the active track.",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "showVideoInOverlay": {
+          "type": "boolean",
+          "description": "Whether the YouTube video player should be rendered in the OBS overlay."
+        },
         "hostId": {
           "type": "string",
           "description": "UID of the streamer/host controlling the session.",
@@ -273,6 +309,10 @@
         "isPlaying": {
           "type": "boolean",
           "description": "Whether audio playback is currently running (for OBS sync)."
+        },
+        "isMuted": {
+          "type": "boolean",
+          "description": "Whether audio playback is currently muted in the OBS overlay player."
         },
         "playbackPosition": {
           "type": "number",

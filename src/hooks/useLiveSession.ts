@@ -7,6 +7,7 @@ import {
   onSnapshot,
   setDoc,
   getDoc,
+  getDocs,
   updateDoc,
   deleteDoc,
   increment,
@@ -19,6 +20,7 @@ import {
   handleFirestoreError,
   OperationType,
 } from '../lib/firebase';
+import { extractYouTubeId } from '../lib/youtube';
 import {
   calculateAverageScore,
   calculateMetaScore,
@@ -33,6 +35,7 @@ import {
   type TopCritic,
   type Track,
   type TrackReview,
+  type TrackSnapshot,
   type TrackStatus,
   type User,
   type UserRole,
@@ -94,10 +97,14 @@ export const INITIAL_LIVE_SESSION: LiveSession = {
   streamStatus: 'idle',
   activeTrackId: null,
   activeTrackSnapshot: null,
+  youtubeUrl: '',
+  youtubeId: '',
+  showVideoInOverlay: true,
   hostId: 'streamer_host',
   title: 'ქართული რელიზების ლაივ-განხილვა',
   votingOpen: false,
-  isPlaying: false,
+  isPlaying: true,
+  isMuted: false,
   playbackPosition: 0,
   showObsOverlay: true,
   obsTheme: 'dark',
@@ -105,6 +112,71 @@ export const INITIAL_LIVE_SESSION: LiveSession = {
   viewersCount: 0,
   updatedAt: Date.now(),
 };
+
+/**
+ * ავტომატურად იღებს youtubeUrl-სა და youtubeId-ს ტრეკის ველებიდან (youtubeUrl, sourceUrl, audioUrl).
+ */
+export function resolveTrackYouTubeFields(
+  track:
+    | {
+        youtubeUrl?: string;
+        youtubeId?: string;
+        sourceUrl?: string;
+        audioUrl?: string;
+      }
+    | null
+    | undefined,
+  fallbackSnapshot?: TrackSnapshot | null
+): { youtubeUrl: string; youtubeId: string } {
+  const primaryCandidate = (
+    track?.youtubeUrl ||
+    track?.sourceUrl ||
+    track?.audioUrl ||
+    fallbackSnapshot?.youtubeUrl ||
+    ''
+  ).trim();
+
+  const extractedFromPrimary = extractYouTubeId(primaryCandidate);
+  const extractedFromSource = track?.sourceUrl
+    ? extractYouTubeId(track.sourceUrl)
+    : null;
+  const extractedFromAudio = track?.audioUrl
+    ? extractYouTubeId(track.audioUrl)
+    : null;
+
+  const resolvedId = (
+    extractedFromPrimary ||
+    extractedFromSource ||
+    extractedFromAudio ||
+    track?.youtubeId ||
+    fallbackSnapshot?.youtubeId ||
+    ''
+  ).trim();
+
+  let resolvedUrl = '';
+  if (resolvedId) {
+    if (track?.youtubeUrl && extractYouTubeId(track.youtubeUrl)) {
+      resolvedUrl = track.youtubeUrl.trim();
+    } else if (extractedFromPrimary) {
+      resolvedUrl = primaryCandidate;
+    } else if (extractedFromSource && track?.sourceUrl) {
+      resolvedUrl = track.sourceUrl.trim();
+    } else if (extractedFromAudio && track?.audioUrl) {
+      resolvedUrl = track.audioUrl.trim();
+    } else if (fallbackSnapshot?.youtubeUrl) {
+      resolvedUrl = fallbackSnapshot.youtubeUrl.trim();
+    } else {
+      resolvedUrl = `https://www.youtube.com/watch?v=${resolvedId}`;
+    }
+  } else if (track?.youtubeUrl) {
+    resolvedUrl = track.youtubeUrl.trim();
+  }
+
+  return {
+    youtubeUrl: resolvedUrl.slice(0, 500),
+    youtubeId: resolvedId.slice(0, 64),
+  };
+}
 
 interface BroadcastPayload {
   session?: LiveSession;
@@ -170,6 +242,9 @@ export interface UseLiveSessionResult {
   error: Error | null;
   isLive: boolean;
   votingOpen: boolean;
+  isPlaying: boolean;
+  isMuted: boolean;
+  showVideoInOverlay: boolean;
   isFirestoreSynced: boolean;
   updateDraftScores: (draft: CriteriaScores) => Promise<void>;
   updateStreamStatus: (status: LiveStreamStatus) => Promise<void>;
@@ -179,19 +254,26 @@ export interface UseLiveSessionResult {
     artist: string;
     coverUrl: string;
     genre?: string;
+    youtubeUrl?: string;
     audioUrl?: string;
     sourceUrl?: string;
   }) => Promise<Track>;
   submitNewTrack: (input: SubmitNewTrackInput) => Promise<Track>;
-  launchTrackOnAir: (trackId: string) => Promise<void>;
-  selectActiveTrack: (trackId: string) => Promise<void>;
+  launchTrackOnAir: (trackOrId: string | Track) => Promise<void>;
+  selectActiveTrack: (trackOrId: string | Track) => Promise<void>;
   updateCommunityPrediction: (communityAvg: number) => Promise<void>;
   submitTrackReview: (input: SubmitReviewInput) => Promise<TrackReview>;
   toggleReviewHelpful: (reviewId: string, trackId?: string) => Promise<void>;
   deleteTrack: (trackId: string) => Promise<void>;
   deleteTrackReview: (trackId: string, reviewId: string) => Promise<void>;
+  toggleShowVideoInOverlay: (nextValue?: boolean) => Promise<void>;
+  togglePlayback: (nextPlaying?: boolean) => Promise<void>;
+  toggleMute: (nextMuted?: boolean) => Promise<void>;
   updateObsSettings: (settings: {
     showObsOverlay?: boolean;
+    showVideoInOverlay?: boolean;
+    isPlaying?: boolean;
+    isMuted?: boolean;
     obsTheme?: 'dark' | 'neon' | 'minimal' | 'compact';
   }) => Promise<void>;
 }
@@ -467,11 +549,37 @@ export function useLiveSession(
       (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.data() as Omit<LiveSession, 'id'>;
+          const snapYoutube = resolveTrackYouTubeFields(
+            data.activeTrackSnapshot ?? undefined,
+            data.activeTrackSnapshot ?? null
+          );
+          const sessionYoutubeUrl =
+            data.youtubeUrl ??
+            data.activeTrackSnapshot?.youtubeUrl ??
+            snapYoutube.youtubeUrl;
+          const sessionYoutubeId =
+            data.youtubeId ??
+            data.activeTrackSnapshot?.youtubeId ??
+            snapYoutube.youtubeId;
           const nextSession: LiveSession = {
+            ...INITIAL_LIVE_SESSION,
             ...data,
             id: snapshot.id,
             activeTrackId: data.activeTrackId || null,
-            activeTrackSnapshot: data.activeTrackSnapshot ?? null,
+            activeTrackSnapshot: data.activeTrackSnapshot
+              ? {
+                  ...data.activeTrackSnapshot,
+                  youtubeUrl:
+                    data.activeTrackSnapshot.youtubeUrl ?? sessionYoutubeUrl,
+                  youtubeId:
+                    data.activeTrackSnapshot.youtubeId ?? sessionYoutubeId,
+                }
+              : null,
+            youtubeUrl: sessionYoutubeUrl,
+            youtubeId: sessionYoutubeId,
+            showVideoInOverlay: Boolean(data.showVideoInOverlay ?? true),
+            isPlaying: Boolean(data.isPlaying ?? true),
+            isMuted: Boolean(data.isMuted ?? false),
             liveExpertDraft: data.liveExpertDraft ?? null,
           };
           setSession(nextSession);
@@ -533,6 +641,14 @@ export function useLiveSession(
             ...d,
             id: docSnap.id,
             artistId: d.artistId || getArtistIdFromName(d.artist || ''),
+            youtubeUrl:
+              d.youtubeUrl ||
+              resolveTrackYouTubeFields(d).youtubeUrl ||
+              undefined,
+            youtubeId:
+              d.youtubeId ||
+              resolveTrackYouTubeFields(d).youtubeId ||
+              undefined,
             createdAt: createdMs,
           };
         });
@@ -823,10 +939,13 @@ export function useLiveSession(
       (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.data() as Omit<Track, 'id'>;
+          const ytFields = resolveTrackYouTubeFields(data);
           const firestoreTrack: Track = {
             ...data,
             id: snapshot.id,
             artistId: data.artistId || getArtistIdFromName(data.artist || ''),
+            youtubeUrl: data.youtubeUrl || ytFields.youtubeUrl || undefined,
+            youtubeId: data.youtubeId || ytFields.youtubeId || undefined,
           };
           setActiveTrack(firestoreTrack);
           setTracksQueue((prev) => {
@@ -869,29 +988,16 @@ export function useLiveSession(
       trackCandidate: Track | null,
       existingSnapshot?: LiveSession['activeTrackSnapshot']
     ): LiveSession['activeTrackSnapshot'] => {
-      const resolvedTrack =
-        trackCandidate ??
-        tracksQueueRef.current.find(
-          (t) => t.id === (session?.activeTrackId ?? '')
-        ) ??
-        null;
-
-      if (resolvedTrack) {
-        return {
-          id: resolvedTrack.id,
-          title: (resolvedTrack.title || 'უსათაურო ტრეკი').slice(0, 120),
-          artist: (resolvedTrack.artist || 'უცნობი არტისტი').slice(0, 120),
-          coverUrl: (resolvedTrack.coverUrl || defaultCoverImg).slice(0, 500),
-          genre: (resolvedTrack.genre || 'ქართული სცენა').slice(0, 60),
-          expertScore: resolvedTrack.expertScore ?? null,
-          expertTotalScore: resolvedTrack.expertTotalScore ?? null,
-          communityTotalScore: resolvedTrack.communityTotalScore ?? null,
-          communityVotesCount: resolvedTrack.communityVotesCount ?? 0,
-          metaScore: resolvedTrack.metaScore ?? null,
-        };
-      }
-
       if (existingSnapshot && existingSnapshot.id) {
+        const matchedFromQueue = tracksQueueRef.current.find(
+          (t) => t.id === existingSnapshot.id
+        );
+        const yt = resolveTrackYouTubeFields(
+          trackCandidate && trackCandidate.id === existingSnapshot.id
+            ? trackCandidate
+            : matchedFromQueue,
+          existingSnapshot
+        );
         return {
           id: existingSnapshot.id,
           title: (existingSnapshot.title || 'უსათაურო ტრეკი').slice(0, 120),
@@ -901,11 +1007,38 @@ export function useLiveSession(
             500
           ),
           genre: (existingSnapshot.genre || 'ქართული სცენა').slice(0, 60),
+          youtubeUrl: yt.youtubeUrl,
+          youtubeId: yt.youtubeId,
           expertScore: existingSnapshot.expertScore ?? null,
           expertTotalScore: existingSnapshot.expertTotalScore ?? null,
           communityTotalScore: existingSnapshot.communityTotalScore ?? null,
           communityVotesCount: existingSnapshot.communityVotesCount ?? 0,
           metaScore: existingSnapshot.metaScore ?? null,
+        };
+      }
+
+      const resolvedTrack =
+        trackCandidate ??
+        tracksQueueRef.current.find(
+          (t) => t.id === (session?.activeTrackId ?? '')
+        ) ??
+        null;
+
+      if (resolvedTrack) {
+        const yt = resolveTrackYouTubeFields(resolvedTrack, existingSnapshot);
+        return {
+          id: resolvedTrack.id,
+          title: (resolvedTrack.title || 'უსათაურო ტრეკი').slice(0, 120),
+          artist: (resolvedTrack.artist || 'უცნობი არტისტი').slice(0, 120),
+          coverUrl: (resolvedTrack.coverUrl || defaultCoverImg).slice(0, 500),
+          genre: (resolvedTrack.genre || 'ქართული სცენა').slice(0, 60),
+          youtubeUrl: yt.youtubeUrl,
+          youtubeId: yt.youtubeId,
+          expertScore: resolvedTrack.expertScore ?? null,
+          expertTotalScore: resolvedTrack.expertTotalScore ?? null,
+          communityTotalScore: resolvedTrack.communityTotalScore ?? null,
+          communityVotesCount: resolvedTrack.communityVotesCount ?? 0,
+          metaScore: resolvedTrack.metaScore ?? null,
         };
       }
 
@@ -918,10 +1051,28 @@ export function useLiveSession(
     async (nextSession: LiveSession) => {
       if (!auth.currentUser) return;
       const sessionPath = `live_sessions/${sessionId}`;
-      const resolvedSnapshot = buildTrackSnapshot(
-        activeTrack,
-        nextSession.activeTrackSnapshot
-      );
+      const candidateTrack =
+        nextSession.activeTrackId === null
+          ? null
+          : activeTrack && activeTrack.id === nextSession.activeTrackId
+            ? activeTrack
+            : tracksQueueRef.current.find(
+                (t) => t.id === nextSession.activeTrackId
+              ) ?? null;
+      const resolvedSnapshot =
+        nextSession.activeTrackId === null && !nextSession.activeTrackSnapshot
+          ? null
+          : buildTrackSnapshot(candidateTrack, nextSession.activeTrackSnapshot);
+      const sessionYoutubeUrl = (
+        resolvedSnapshot?.youtubeUrl ??
+        nextSession.youtubeUrl ??
+        ''
+      ).slice(0, 500);
+      const sessionYoutubeId = (
+        resolvedSnapshot?.youtubeId ??
+        nextSession.youtubeId ??
+        ''
+      ).slice(0, 64);
       const safeHostId =
         (auth.currentUser?.uid || nextSession.hostId || 'streamer_host')
           .replace(/[^a-zA-Z0-9_\-]/g, '_')
@@ -937,12 +1088,18 @@ export function useLiveSession(
             activeTrackId:
               nextSession.activeTrackId ?? resolvedSnapshot?.id ?? null,
             activeTrackSnapshot: resolvedSnapshot,
+            youtubeUrl: sessionYoutubeUrl,
+            youtubeId: sessionYoutubeId,
+            showVideoInOverlay: Boolean(
+              nextSession.showVideoInOverlay ?? true
+            ),
             hostId: safeHostId,
             title: (
               nextSession.title || 'ქართული რელიზების ლაივ-განხილვა'
             ).slice(0, 140),
             votingOpen: Boolean(nextSession.votingOpen),
-            isPlaying: Boolean(nextSession.isPlaying),
+            isPlaying: Boolean(nextSession.isPlaying ?? true),
+            isMuted: Boolean(nextSession.isMuted ?? false),
             playbackPosition: nextSession.playbackPosition ?? 0,
             showObsOverlay: Boolean(nextSession.showObsOverlay ?? true),
             obsTheme: nextSession.obsTheme || 'dark',
@@ -989,6 +1146,7 @@ export function useLiveSession(
           }
         }
 
+        const ytFields = resolveTrackYouTubeFields(track);
         const payload: Record<string, unknown> = {
           id: track.id,
           title: track.title.slice(0, 120),
@@ -1002,6 +1160,8 @@ export function useLiveSession(
             0,
             500
           ),
+          youtubeUrl: ytFields.youtubeUrl,
+          youtubeId: ytFields.youtubeId,
           genre: (track.genre || 'ქართული სცენა').slice(0, 60),
           duration: track.duration ?? 210,
           submittedBy: existingSubmittedBy ?? auth.currentUser.uid,
@@ -1170,11 +1330,18 @@ export function useLiveSession(
         }
       }
 
+      const verdictYt = resolveTrackYouTubeFields(
+        updatedActiveTrack,
+        currentSession.activeTrackSnapshot
+      );
+
       const nextSession: LiveSession = {
         ...currentSession,
         streamStatus: 'revealed',
         votingOpen: false,
         liveExpertDraft: finalScores,
+        youtubeUrl: verdictYt.youtubeUrl,
+        youtubeId: verdictYt.youtubeId,
         activeTrackSnapshot: updatedActiveTrack
           ? {
               id: updatedActiveTrack.id,
@@ -1182,6 +1349,8 @@ export function useLiveSession(
               artist: updatedActiveTrack.artist,
               coverUrl: updatedActiveTrack.coverUrl,
               genre: updatedActiveTrack.genre,
+              youtubeUrl: verdictYt.youtubeUrl,
+              youtubeId: verdictYt.youtubeId,
               expertScore: finalScores,
               expertTotalScore: expertAvg,
               communityTotalScore:
@@ -1229,6 +1398,10 @@ export function useLiveSession(
         (input.coverUrl ?? '').trim().slice(0, 500) || defaultCoverImg;
 
       const status: TrackStatus = input.destinationStatus;
+      const ytFields = resolveTrackYouTubeFields({
+        sourceUrl: cleanSourceUrl,
+        audioUrl: cleanSourceUrl,
+      });
 
       const newTrack: Track = {
         id: cleanId,
@@ -1238,6 +1411,8 @@ export function useLiveSession(
         coverUrl: cleanCoverUrl,
         audioUrl: cleanSourceUrl || 'https://soundcheck.live/audio/stream.mp3',
         sourceUrl: cleanSourceUrl,
+        youtubeUrl: ytFields.youtubeUrl || undefined,
+        youtubeId: ytFields.youtubeId || undefined,
         genre: cleanGenre,
         duration: 210,
         submittedBy: auth.currentUser?.uid ?? 'musician_user',
@@ -1278,6 +1453,7 @@ export function useLiveSession(
       artist: string;
       coverUrl: string;
       genre?: string;
+      youtubeUrl?: string;
       audioUrl?: string;
       sourceUrl?: string;
     }): Promise<Track> => {
@@ -1291,10 +1467,29 @@ export function useLiveSession(
       };
 
       const cleanArtist = input.artist.trim().slice(0, 120);
+      const rawCandidateUrl = (
+        input.youtubeUrl ||
+        input.sourceUrl ||
+        input.audioUrl ||
+        ''
+      )
+        .trim()
+        .slice(0, 500);
+      const extractedYoutubeId = extractYouTubeId(rawCandidateUrl) || '';
+      const resolvedYoutubeUrl = extractedYoutubeId
+        ? rawCandidateUrl
+        : (input.youtubeUrl || '').trim().slice(0, 500);
+
       const cleanAudioUrl =
-        (input.audioUrl || input.sourceUrl || '').trim().slice(0, 500) ||
-        'https://soundcheck.live/audio/stream.mp3';
-      const cleanSourceUrl = (input.sourceUrl || input.audioUrl || '')
+        (input.audioUrl || input.sourceUrl || input.youtubeUrl || '')
+          .trim()
+          .slice(0, 500) || 'https://soundcheck.live/audio/stream.mp3';
+      const cleanSourceUrl = (
+        input.sourceUrl ||
+        input.youtubeUrl ||
+        input.audioUrl ||
+        ''
+      )
         .trim()
         .slice(0, 500);
       const newTrack: Track = {
@@ -1305,6 +1500,8 @@ export function useLiveSession(
         coverUrl: input.coverUrl.trim() || defaultCoverImg,
         audioUrl: cleanAudioUrl,
         sourceUrl: cleanSourceUrl || undefined,
+        youtubeUrl: resolvedYoutubeUrl || undefined,
+        youtubeId: extractedYoutubeId || undefined,
         genre: (input.genre || 'ქართული სცენა').trim().slice(0, 60),
         duration: 205,
         submittedBy: auth.currentUser?.uid ?? 'streamer_host',
@@ -1347,7 +1544,12 @@ export function useLiveSession(
         isLive: true,
         streamStatus: 'listening',
         votingOpen: true,
+        isPlaying: true,
+        isMuted: Boolean(currentSession.isMuted ?? false),
         activeTrackId: newTrack.id,
+        youtubeUrl: resolvedYoutubeUrl,
+        youtubeId: extractedYoutubeId,
+        showVideoInOverlay: currentSession.showVideoInOverlay ?? true,
         liveExpertDraft: defaultDraft,
         activeTrackSnapshot: {
           id: newTrack.id,
@@ -1355,6 +1557,8 @@ export function useLiveSession(
           artist: newTrack.artist,
           coverUrl: newTrack.coverUrl,
           genre: newTrack.genre,
+          youtubeUrl: resolvedYoutubeUrl,
+          youtubeId: extractedYoutubeId,
           expertScore: null,
           expertTotalScore: null,
           communityTotalScore: null,
@@ -1402,34 +1606,60 @@ export function useLiveSession(
   );
 
   /**
-   * ერთი კლიკით გადააქვს არჩეული ტრეკი მიმდინარე ლაივ-სესიის `activeTrackId`-ში
-   * და მის სტატუსს ცვლის `'on_air'`-ზე ("ეთერში გაშვება").
+   * ერთი კლიკით გადააქვს არჩეული ტრეკი მიმდინარე ლაივ-სესიის `activeTrackId`-ში,
+   * ავტომატურად იღებს `youtubeId`-ს `track.youtubeUrl`-იდან (ან `sourceUrl`/`audioUrl`-იდან)
+   * და ინახავს `youtubeUrl`-სა და `youtubeId`-ს `activeTrackSnapshot`-ში (`live_sessions/current`).
    */
   const launchTrackOnAir = useCallback(
-    async (trackId: string) => {
-      const target = tracksQueue.find((t) => t.id === trackId);
+    async (trackOrId: string | Track) => {
+      const targetId =
+        typeof trackOrId === 'string' ? trackOrId : trackOrId.id;
+      const fromQueue = tracksQueue.find((t) => t.id === targetId);
+      const target: Track | undefined =
+        typeof trackOrId === 'string'
+          ? fromQueue
+          : { ...(fromQueue ?? {}), ...trackOrId };
       if (!target) return;
+
+      const ytFields = resolveTrackYouTubeFields(target);
 
       const updatedTarget: Track = {
         ...target,
+        youtubeUrl: ytFields.youtubeUrl || target.youtubeUrl,
+        youtubeId: ytFields.youtubeId || target.youtubeId,
         status: 'on_air',
         updatedAt: Date.now(),
       };
 
       const previousOnAirTracks = tracksQueue.filter(
-        (t) => t.id !== trackId && t.status === 'on_air'
+        (t) => t.id !== targetId && t.status === 'on_air'
       );
 
-      const updatedTracks: Track[] = tracksQueue.map((t) => {
-        if (t.id === trackId) return updatedTarget;
-        if (t.status === 'on_air') {
-          return {
-            ...t,
-            status: t.expertScore ? 'reviewed' : 'community_catalog',
-          };
-        }
-        return t;
-      });
+      const existsInQueue = tracksQueue.some((t) => t.id === targetId);
+      const updatedTracks: Track[] = existsInQueue
+        ? tracksQueue.map((t) => {
+            if (t.id === targetId) return updatedTarget;
+            if (t.status === 'on_air') {
+              return {
+                ...t,
+                status: t.expertScore ? 'reviewed' : 'community_catalog',
+              };
+            }
+            return t;
+          })
+        : [
+            updatedTarget,
+            ...tracksQueue.map((t) =>
+              t.status === 'on_air'
+                ? {
+                    ...t,
+                    status: (t.expertScore
+                      ? 'reviewed'
+                      : 'community_catalog') as TrackStatus,
+                  }
+                : t
+            ),
+          ];
 
       setTracksQueue(updatedTracks);
       setActiveTrack(updatedTarget);
@@ -1444,6 +1674,11 @@ export function useLiveSession(
         ...currentSession,
         isLive: true,
         activeTrackId: updatedTarget.id,
+        youtubeUrl: ytFields.youtubeUrl,
+        youtubeId: ytFields.youtubeId,
+        showVideoInOverlay: currentSession.showVideoInOverlay ?? true,
+        isPlaying: true,
+        isMuted: Boolean(currentSession.isMuted ?? false),
         streamStatus: updatedTarget.expertScore ? 'revealed' : 'listening',
         votingOpen: !updatedTarget.expertScore,
         liveExpertDraft: nextDraft,
@@ -1453,6 +1688,8 @@ export function useLiveSession(
           artist: updatedTarget.artist,
           coverUrl: updatedTarget.coverUrl,
           genre: updatedTarget.genre,
+          youtubeUrl: ytFields.youtubeUrl,
+          youtubeId: ytFields.youtubeId,
           expertScore: updatedTarget.expertScore,
           expertTotalScore: updatedTarget.expertTotalScore ?? null,
           communityTotalScore: updatedTarget.communityTotalScore ?? null,
@@ -1506,8 +1743,8 @@ export function useLiveSession(
   );
 
   const selectActiveTrack = useCallback(
-    async (trackId: string) => {
-      await launchTrackOnAir(trackId);
+    async (trackOrId: string | Track) => {
+      await launchTrackOnAir(trackOrId);
     },
     [launchTrackOnAir]
   );
@@ -1630,16 +1867,24 @@ export function useLiveSession(
       }
 
       const currentSession = session ?? INITIAL_LIVE_SESSION;
+      const reviewYt = resolveTrackYouTubeFields(
+        updatedTrack,
+        currentSession.activeTrackSnapshot
+      );
       const nextSession: LiveSession =
         currentSession.activeTrackId === updatedTrack.id
           ? {
               ...currentSession,
+              youtubeUrl: reviewYt.youtubeUrl,
+              youtubeId: reviewYt.youtubeId,
               activeTrackSnapshot: {
                 id: updatedTrack.id,
                 title: updatedTrack.title,
                 artist: updatedTrack.artist,
                 coverUrl: updatedTrack.coverUrl,
                 genre: updatedTrack.genre,
+                youtubeUrl: reviewYt.youtubeUrl,
+                youtubeId: reviewYt.youtubeId,
                 expertScore: updatedTrack.expertScore,
                 expertTotalScore: updatedTrack.expertTotalScore ?? null,
                 communityTotalScore: updatedTrack.communityTotalScore ?? null,
@@ -1665,55 +1910,6 @@ export function useLiveSession(
         );
         const trackPath = `tracks/${targetTrack.id}`;
         const trackRef = doc(db, 'tracks', targetTrack.id);
-        try {
-          const trackSnap = await getDoc(trackRef);
-          if (!trackSnap.exists()) {
-            await setDoc(trackRef, {
-              id: targetTrack.id,
-              title: targetTrack.title.slice(0, 120),
-              artist: targetTrack.artist.slice(0, 120),
-              artistId:
-                targetTrack.artistId || getArtistIdFromName(targetTrack.artist),
-              coverUrl: (targetTrack.coverUrl || defaultCoverImg).slice(0, 500),
-              audioUrl: (
-                targetTrack.audioUrl || 'https://soundcheck.live/audio/stream.mp3'
-              ).slice(0, 500),
-              sourceUrl: (
-                targetTrack.sourceUrl || 'https://open.spotify.com'
-              ).slice(0, 500),
-              genre: (targetTrack.genre || 'ქართული სცენა').slice(0, 60),
-              duration: targetTrack.duration ?? 210,
-              submittedBy: auth.currentUser.uid,
-              submittedByName: (
-                auth.currentUser.displayName || 'ქართველი მუსიკოსი'
-              ).slice(0, 80),
-              isPriority: false,
-              status: 'community_catalog',
-              expertScore: null,
-              expertTotalScore: null,
-              communityScore: null,
-              communityTotalScore: null,
-              communityVotesCount: 0,
-              metaScore: null,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            });
-          }
-
-          await updateDoc(trackRef, {
-            communityScore: recalculated.communityScore,
-            communityTotalScore: recalculated.communityTotalScore,
-            communityVotesCount: recalculated.communityVotesCount,
-            metaScore: recalculated.metaScore,
-            updatedAt: serverTimestamp(),
-          });
-        } catch (err) {
-          try {
-            handleFirestoreError(err, OperationType.UPDATE, trackPath);
-          } catch {
-            // logged by handleFirestoreError
-          }
-        }
 
         const reviewPath = `tracks/${targetTrack.id}/reviews/${reviewId}`;
         try {
@@ -1736,6 +1932,53 @@ export function useLiveSession(
         } catch (err) {
           try {
             handleFirestoreError(err, OperationType.CREATE, reviewPath);
+          } catch {
+            // logged by handleFirestoreError
+          }
+        }
+
+        // ხელახლა გადავითვალოთ შეწონილი რეიტინგი პირდაპირ `tracks/{id}/reviews` ქვეკოლექციის დოკუმენტებიდან
+        try {
+          const allReviewsSnap = await getDocs(
+            collection(db, 'tracks', targetTrack.id, 'reviews')
+          );
+          const allReviewDocs = allReviewsSnap.docs.map((d) => {
+            const data = d.data();
+            return {
+              scores: (data.scores as CriteriaScores) || input.scores,
+              voteWeight:
+                typeof data.voteWeight === 'number' ? data.voteWeight : 1.0,
+              totalScore:
+                typeof data.totalScore === 'number'
+                  ? data.totalScore
+                  : reviewAvg,
+            };
+          });
+
+          const exactRecalculated =
+            allReviewDocs.length > 0
+              ? recalculateCommunityScoresFromReviews(
+                  allReviewDocs,
+                  targetTrack.expertScore
+                )
+              : {
+                  ...recalculated,
+                  peopleScore: recalculated.communityTotalScore,
+                  reviewsCount: recalculated.communityVotesCount,
+                };
+
+          await updateDoc(trackRef, {
+            communityScore: exactRecalculated.communityScore,
+            communityTotalScore: exactRecalculated.communityTotalScore,
+            peopleScore: exactRecalculated.peopleScore,
+            communityVotesCount: exactRecalculated.communityVotesCount,
+            reviewsCount: exactRecalculated.reviewsCount,
+            metaScore: exactRecalculated.metaScore,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          try {
+            handleFirestoreError(err, OperationType.UPDATE, trackPath);
           } catch {
             // logged by handleFirestoreError
           }
@@ -1793,6 +2036,8 @@ export function useLiveSession(
           votingOpen: false,
           activeTrackId: null,
           activeTrackSnapshot: null,
+          youtubeUrl: '',
+          youtubeId: '',
           updatedAt: Date.now(),
         };
         setSession(nextSession);
@@ -1828,23 +2073,38 @@ export function useLiveSession(
         throw err;
       }
 
-      const remainingForTrack = reviews.filter(
-        (r) => r.trackId === trackId && r.id !== reviewId
+      const remainingSnap = await getDocs(
+        collection(db, 'tracks', trackId, 'reviews')
       );
+      const remainingFromFirestore = remainingSnap.docs
+        .filter((d) => d.id !== reviewId)
+        .map((d) => {
+          const data = d.data();
+          return {
+            scores: (data.scores as CriteriaScores) || INITIAL_CRITERIA_SCORES,
+            voteWeight:
+              typeof data.voteWeight === 'number' ? data.voteWeight : 1.0,
+            totalScore:
+              typeof data.totalScore === 'number' ? data.totalScore : 8.0,
+          };
+        });
+
       const nextReviews = reviews.filter((r) => r.id !== reviewId);
       setReviews(nextReviews);
 
       const targetTrack = tracksQueue.find((t) => t.id === trackId);
       if (targetTrack) {
         const recalculated = recalculateCommunityScoresFromReviews(
-          remainingForTrack,
+          remainingFromFirestore,
           targetTrack.expertScore
         );
         const updatedTrack: Track = {
           ...targetTrack,
           communityScore: recalculated.communityScore,
           communityTotalScore: recalculated.communityTotalScore,
+          peopleScore: recalculated.peopleScore,
           communityVotesCount: recalculated.communityVotesCount,
+          reviewsCount: recalculated.reviewsCount,
           metaScore: recalculated.metaScore,
           updatedAt: Date.now(),
         };
@@ -1861,7 +2121,9 @@ export function useLiveSession(
           await updateDoc(doc(db, 'tracks', trackId), {
             communityScore: recalculated.communityScore,
             communityTotalScore: recalculated.communityTotalScore,
+            peopleScore: recalculated.peopleScore,
             communityVotesCount: recalculated.communityVotesCount,
+            reviewsCount: recalculated.reviewsCount,
             metaScore: recalculated.metaScore,
             updatedAt: serverTimestamp(),
           });
@@ -1929,6 +2191,9 @@ export function useLiveSession(
   const updateObsSettings = useCallback(
     async (settings: {
       showObsOverlay?: boolean;
+      showVideoInOverlay?: boolean;
+      isPlaying?: boolean;
+      isMuted?: boolean;
       obsTheme?: 'dark' | 'neon' | 'minimal' | 'compact';
     }) => {
       const currentSession = session ?? INITIAL_LIVE_SESSION;
@@ -1940,6 +2205,14 @@ export function useLiveSession(
         ...currentSession,
         showObsOverlay:
           settings.showObsOverlay ?? currentSession.showObsOverlay ?? true,
+        showVideoInOverlay:
+          settings.showVideoInOverlay ??
+          currentSession.showVideoInOverlay ??
+          true,
+        isPlaying:
+          settings.isPlaying ?? currentSession.isPlaying ?? true,
+        isMuted:
+          settings.isMuted ?? currentSession.isMuted ?? false,
         obsTheme: settings.obsTheme ?? currentSession.obsTheme ?? 'dark',
         activeTrackSnapshot: snapshot,
         updatedAt: Date.now(),
@@ -1962,6 +2235,45 @@ export function useLiveSession(
       buildTrackSnapshot,
       syncSessionToFirestore,
     ]
+  );
+
+  /**
+   * გადამრთველი (Toggle): "ვიდეოს ჩვენება ოვერლეიზე" (`showVideoInOverlay: boolean`)
+   */
+  const toggleShowVideoInOverlay = useCallback(
+    async (nextValue?: boolean) => {
+      const currentVal = session?.showVideoInOverlay ?? true;
+      const resolvedNext =
+        typeof nextValue === 'boolean' ? nextValue : !currentVal;
+      await updateObsSettings({ showVideoInOverlay: resolvedNext });
+    },
+    [session?.showVideoInOverlay, updateObsSettings]
+  );
+
+  /**
+   * დაკვრა / დაპაუზება (`isPlaying: boolean` live_sessions/current დოკუმენტში)
+   */
+  const togglePlayback = useCallback(
+    async (nextPlaying?: boolean) => {
+      const currentVal = session?.isPlaying ?? true;
+      const resolvedNext =
+        typeof nextPlaying === 'boolean' ? nextPlaying : !currentVal;
+      await updateObsSettings({ isPlaying: resolvedNext });
+    },
+    [session?.isPlaying, updateObsSettings]
+  );
+
+  /**
+   * ხმის ჩართვა / გამორთვა (`isMuted: boolean` live_sessions/current დოკუმენტში)
+   */
+  const toggleMute = useCallback(
+    async (nextMuted?: boolean) => {
+      const currentVal = session?.isMuted ?? false;
+      const resolvedNext =
+        typeof nextMuted === 'boolean' ? nextMuted : !currentVal;
+      await updateObsSettings({ isMuted: resolvedNext });
+    },
+    [session?.isMuted, updateObsSettings]
   );
 
   // ტრეკები სტატუსით 'in_queue', დალაგებული დამატების დროის მიხედვით (ზრდადობით: პირველი დამატებული პირველია რიგში)
@@ -2020,6 +2332,9 @@ export function useLiveSession(
     error,
     isLive: Boolean(session?.isLive && session?.streamStatus !== 'idle'),
     votingOpen: Boolean(session?.votingOpen),
+    isPlaying: Boolean(session?.isPlaying ?? true),
+    isMuted: Boolean(session?.isMuted ?? false),
+    showVideoInOverlay: Boolean(session?.showVideoInOverlay ?? true),
     isFirestoreSynced,
     updateDraftScores,
     updateStreamStatus,
@@ -2033,6 +2348,9 @@ export function useLiveSession(
     toggleReviewHelpful,
     deleteTrack,
     deleteTrackReview,
+    toggleShowVideoInOverlay,
+    togglePlayback,
+    toggleMute,
     updateObsSettings,
   };
 }
