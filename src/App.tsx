@@ -40,40 +40,93 @@ function detectInitialRoute(): RouteState {
     return defaultState;
   }
 
-  const path = window.location.pathname;
+  const normalizedPath = window.location.pathname.replace(/\/+$/, '') || '/';
   const params = new URLSearchParams(window.location.search);
+  const hash = window.location.hash.replace(/^#\/?/, '');
 
-  if (path.startsWith('/overlay') || params.get('view') === 'overlay') {
+  if (
+    normalizedPath === '/overlay' ||
+    normalizedPath.startsWith('/overlay/') ||
+    params.get('view') === 'overlay' ||
+    hash === 'overlay'
+  ) {
     return { ...defaultState, view: 'overlay' };
   }
-  if (path.startsWith('/studio') || params.get('view') === 'studio') {
+
+  if (
+    normalizedPath === '/studio' ||
+    normalizedPath.startsWith('/studio/') ||
+    params.get('view') === 'studio' ||
+    hash === 'studio'
+  ) {
     return { ...defaultState, view: 'studio' };
   }
-  if (path.startsWith('/artist/')) {
-    const idFromPath = path.replace('/artist/', '').split('/')[0];
+
+  if (normalizedPath.startsWith('/artist/')) {
+    const rawSegment = normalizedPath.slice('/artist/'.length).split('/')[0] || '';
+    let idFromPath = rawSegment;
+    try {
+      idFromPath = decodeURIComponent(rawSegment);
+    } catch {
+      idFromPath = rawSegment;
+    }
     return {
       ...defaultState,
       view: 'artist',
       artistId: idFromPath || 'artist_kordz_moku',
     };
   }
-  if (path.startsWith('/track/')) {
-    const idFromPath = path.replace('/track/', '').split('/')[0];
+
+  if (normalizedPath === '/artist' || params.get('view') === 'artist') {
+    return {
+      ...defaultState,
+      view: 'artist',
+      artistId: params.get('id') || 'artist_kordz_moku',
+    };
+  }
+
+  if (normalizedPath.startsWith('/track/')) {
+    const rawSegment = normalizedPath.slice('/track/'.length).split('/')[0] || '';
+    let idFromPath = rawSegment;
+    try {
+      idFromPath = decodeURIComponent(rawSegment);
+    } catch {
+      idFromPath = rawSegment;
+    }
     return {
       ...defaultState,
       view: 'track',
       trackId: idFromPath || 'track_tbilisi_night',
     };
   }
+
+  if (normalizedPath === '/track' || params.get('view') === 'track') {
+    return {
+      ...defaultState,
+      view: 'track',
+      trackId: params.get('id') || 'track_tbilisi_night',
+    };
+  }
+
   return defaultState;
 }
 
 export default function App() {
-  const [routeState, setRouteState] = useState<RouteState>(detectInitialRoute);
+  const [routeState, setRouteState] = useState<RouteState>(() =>
+    detectInitialRoute()
+  );
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
   const [copiedObs, setCopiedObs] = useState(false);
   const [submitModalOpen, setSubmitModalOpen] = useState(false);
   const [submitModalArtist, setSubmitModalArtist] = useState<string>('');
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setRouteState(detectInitialRoute());
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
