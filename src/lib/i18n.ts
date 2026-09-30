@@ -103,6 +103,14 @@ export const i18n = {
     admin: 'ადმინისტრატორი',
   },
 
+  levels: {
+    1: 'ახალბედა',
+    2: 'მსმენელი',
+    3: 'მელომანი',
+    4: 'კრიტიკოსი',
+    5: 'ექსპერტი',
+  },
+
   roleOptions: {
     viewer: 'მსმენელი',
     vip: 'VIP',
@@ -341,6 +349,30 @@ export const i18n = {
     copiedObsLink: 'ბმული დაკოპირდა',
     regenerateStreamKey: 'გასაღების განახლება',
     streamKeyRegenerated: 'სტრიმის გასაღები განახლდა',
+  },
+
+  chart: {
+    rankUp: 'პოზიციის ზრდა',
+    rankDown: 'პოზიციის კლება',
+    rankStable: 'ნეიტრალური',
+    newBadge: 'NEW',
+    newBadgeTooltip: 'ახალი რელიზი (72 სთ)',
+    hotBadge: 'HOT 🔥',
+    hotBadgeTooltip: 'აქტიური განხილვა (3+ რეცენზია 48 საათში)',
+    matchPercentageLabel: 'შესაბამისობა',
+    preliminaryScore: 'წინასწარი ქულა',
+    verifiedRating: 'დადასტურებული რეიტინგი',
+    hoverPreviewTitle: 'კრიტერიუმების სკალა',
+    latestReviewTitle: 'ბოლო რეცენზია',
+    noReviewsForTrack: 'რეცენზიები ჯერ არ დაწერილა',
+    noCriteriaYet: 'კრიტერიუმები ჯერ არ არის შეფასებული',
+  },
+
+  ticker: {
+    defaultStatus: 'SoundCheck • ქართული მუსიკის ცოცხალი პორტალი',
+    liveActivityLabel: 'ლაივ აქტივობა',
+    ratedVerb: 'შეაფასა',
+    newReleasePrefix: 'ახალი რელიზი კატალოგში',
   },
 } as const;
 

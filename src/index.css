@@ -59,3 +59,29 @@ input[type="range"].studio-fader:focus-visible::-webkit-slider-thumb {
   outline-offset: 2px;
 }
 
+@keyframes soundcheck-marquee {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  display: flex;
+  width: max-content;
+  animation: soundcheck-marquee 38s linear infinite;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee {
+    animation: none;
+  }
+}
+
+

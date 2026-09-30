@@ -16,11 +16,8 @@ import {
 import {
   collection,
   doc,
-  getDocs,
   deleteDoc,
-  updateDoc,
   onSnapshot,
-  serverTimestamp,
 } from 'firebase/firestore';
 import { signInWithPopup } from 'firebase/auth';
 import { i18n } from '../../../lib/i18n';
@@ -35,7 +32,6 @@ import {
   DEFAULT_ROLE_VOTE_WEIGHTS,
   calculateAverageScore,
   calculateFairTrackRating,
-  recalculateCommunityScoresFromReviews,
   getArtistIdFromName,
   type CriteriaKey,
   type CriteriaScores,
@@ -75,6 +71,7 @@ export default function TrackDetailPage({
     loading,
     submitTrackReview,
     toggleReviewHelpful,
+    deleteTrackReview,
     selectActiveTrack,
   } = useLiveSession('current');
 
@@ -296,57 +293,10 @@ export default function TrackDetailPage({
   const handleDeleteReviewClick = async (reviewId: string) => {
     if (!track || currentUserRole !== 'admin') return;
     setDeletingReviewId(reviewId);
-    const trackId = track.id;
     try {
-      await deleteDoc(doc(db, 'tracks', trackId, 'reviews', reviewId));
-
-      // წამოვიღოთ დარჩენილი რეცენზიების დოკუმენტები პირდაპირ Firestore-ის `tracks/{id}/reviews` ქვეკოლექციიდან
-      const remainingSnapshot = await getDocs(
-        collection(db, 'tracks', trackId, 'reviews')
-      );
-      const remainingDocs = remainingSnapshot.docs
-        .filter((d) => d.id !== reviewId)
-        .map((d) => {
-          const data = d.data();
-          return {
-            scores: (data.scores as CriteriaScores) || {
-              lyrics: 8.0,
-              flow: 8.0,
-              production: 8.0,
-              identity: 8.0,
-              vibe: 8.0,
-            },
-            voteWeight:
-              typeof data.voteWeight === 'number' ? data.voteWeight : 1.0,
-            totalScore:
-              typeof data.totalScore === 'number' ? data.totalScore : 8.0,
-          };
-        });
-
-      const recalculated = recalculateCommunityScoresFromReviews(
-        remainingDocs,
-        track.expertScore
-      );
-
-      await updateDoc(doc(db, 'tracks', trackId), {
-        communityScore: recalculated.communityScore,
-        communityTotalScore: recalculated.communityTotalScore,
-        peopleScore: recalculated.peopleScore,
-        communityVotesCount: recalculated.communityVotesCount,
-        reviewsCount: recalculated.reviewsCount,
-        metaScore: recalculated.metaScore,
-        updatedAt: serverTimestamp(),
-      });
-    } catch (err) {
-      try {
-        handleFirestoreError(
-          err,
-          OperationType.DELETE,
-          `tracks/${trackId}/reviews/${reviewId}`
-        );
-      } catch {
-        // logged by handleFirestoreError
-      }
+      await deleteTrackReview(track.id, reviewId);
+    } catch {
+      // logged by deleteTrackReview
     } finally {
       setDeletingReviewId(null);
     }
@@ -1026,13 +976,16 @@ export default function TrackDetailPage({
 
                         <button
                           type="button"
+                          disabled={review.authorId === currentVoterId}
                           onClick={() =>
                             void toggleReviewHelpful(review.id, track.id)
                           }
-                          className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                            isHelpfulVoted
-                              ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
-                              : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                          className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap ${
+                            review.authorId === currentVoterId
+                              ? 'bg-[#0B0F17] border-zinc-800/60 text-zinc-500 cursor-not-allowed opacity-70'
+                              : isHelpfulVoted
+                                ? 'bg-amber-500/15 border-amber-500/50 text-amber-300 cursor-pointer'
+                                : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700 cursor-pointer'
                           }`}
                         >
                           <ThumbsUp className="w-3.5 h-3.5" />

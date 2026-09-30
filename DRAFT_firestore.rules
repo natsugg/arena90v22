@@ -87,11 +87,11 @@ service cloud.firestore {
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
         && (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() >= 0 && data.avatarUrl.size() <= 500))
         && data.role is string && data.role.size() <= 20 && data.role in ['viewer', 'vip', 'moderator', 'expert', 'streamer', 'admin']
-        && data.xp is number && data.xp >= 0 && data.xp <= 10000000
+        && data.xp is number && data.xp >= -1000 && data.xp <= 10000000
         && (!('level' in data) || (data.level is number && data.level >= 1 && data.level <= 1000))
         && data.voteWeight is number && data.voteWeight >= 0.1 && data.voteWeight <= 10.0
         && (!('reviewsCount' in data) || (data.reviewsCount is number && data.reviewsCount >= 0 && data.reviewsCount <= 1000000))
-        && (!('helpfulVotesReceived' in data) || (data.helpfulVotesReceived is number && data.helpfulVotesReceived >= 0 && data.helpfulVotesReceived <= 1000000))
+        && (!('helpfulVotesReceived' in data) || (data.helpfulVotesReceived is number && data.helpfulVotesReceived >= -1000 && data.helpfulVotesReceived <= 1000000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -110,7 +110,9 @@ service cloud.firestore {
           'youtubeUrl', 'youtubeId', 'genre', 'duration', 'submittedBy', 'submittedByName',
           'isPriority', 'donationAmount', 'status',
           'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
-          'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore', 'createdAt', 'updatedAt'
+          'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore',
+          'currentRank', 'previousRank', 'lastRankUpdate', 'criteriaBreakdown',
+          'createdAt', 'updatedAt'
         ])
         && data.id == trackId
         && isValidId(data.id)
@@ -140,6 +142,10 @@ service cloud.firestore {
         && data.communityVotesCount is number && data.communityVotesCount >= 0 && data.communityVotesCount <= 1000000
         && (!('reviewsCount' in data) || data.reviewsCount == null || (data.reviewsCount is number && data.reviewsCount >= 0 && data.reviewsCount <= 1000000))
         && (!('metaScore' in data) || data.metaScore == null || (data.metaScore is number && data.metaScore >= 0 && data.metaScore <= 100))
+        && (!('currentRank' in data) || data.currentRank == null || (data.currentRank is number && data.currentRank >= 1 && data.currentRank <= 10000))
+        && (!('previousRank' in data) || data.previousRank == null || (data.previousRank is number && data.previousRank >= 1 && data.previousRank <= 10000))
+        && (!('lastRankUpdate' in data) || data.lastRankUpdate == null || data.lastRankUpdate is timestamp)
+        && (!('criteriaBreakdown' in data) || data.criteriaBreakdown == null || isValidCriteriaScores(data.criteriaBreakdown))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -150,11 +156,11 @@ service cloud.firestore {
     function isValidReview(data, trackId, reviewId) {
       return data.keys().hasAll([
           'id', 'trackId', 'authorId', 'authorName', 'authorRole',
-          'voteWeight', 'scores', 'totalScore', 'text', 'helpfulCount', 'createdAt'
+          'voteWeight', 'scores', 'totalScore', 'text', 'helpfulCount', 'helpfulVoterIds', 'createdAt'
         ])
         && data.keys().hasOnly([
           'id', 'trackId', 'authorId', 'authorName', 'authorRole',
-          'voteWeight', 'scores', 'totalScore', 'text', 'helpfulCount', 'createdAt'
+          'voteWeight', 'scores', 'totalScore', 'text', 'helpfulCount', 'helpfulVoterIds', 'createdAt'
         ])
         && data.id == reviewId
         && isValidId(data.id)
@@ -168,6 +174,8 @@ service cloud.firestore {
         && data.totalScore is number && data.totalScore >= 1 && data.totalScore <= 10
         && data.text is string && data.text.size() >= 100 && data.text.size() <= 3000
         && data.helpfulCount is number && data.helpfulCount >= 0 && data.helpfulCount <= 1000000
+        && data.helpfulVoterIds is list && data.helpfulVoterIds.size() <= 10000
+        && (data.helpfulVoterIds.size() == 0 || (data.helpfulVoterIds[0] is string && data.helpfulVoterIds[0].size() <= 128))
         && data.createdAt is timestamp;
     }
 
@@ -264,17 +272,28 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && (
-          // Action 1: Owner updates public profile display fields or review activity stats (cannot self-promote role/voteWeight)
+          // Action 1: Owner updates public profile display fields or XP/level/helpfulVotesReceived/reviewsCount (cannot self-promote role/voteWeight)
           (
             request.auth.uid == userId
             && incoming().updatedAt == request.time
             && incoming().role == existing().role
             && incoming().voteWeight == existing().voteWeight
-            && incoming().xp >= existing().xp
-            && incoming().xp <= existing().xp + 500
-            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'xp', 'reviewsCount', 'helpfulVotesReceived', 'updatedAt'])
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'avatarUrl', 'xp', 'level', 'reviewsCount', 'helpfulVotesReceived', 'updatedAt'
+            ])
           ) ||
-          // Action 2: Admin manages role, XP, level, and voteWeight
+          // Action 2: Authenticated user updates review author's XP, level, and helpfulVotesReceived on helpful vote toggle while role and voteWeight remain immutable
+          (
+            request.auth.uid != userId
+            && incoming().updatedAt == request.time
+            && incoming().role == existing().role
+            && incoming().voteWeight == existing().voteWeight
+            && incoming().displayName == existing().displayName
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'xp', 'level', 'helpfulVotesReceived', 'updatedAt'
+            ])
+          ) ||
+          // Action 3: Admin manages role, XP, level, and voteWeight
           (
             (incoming().updatedAt == request.time || incoming().updatedAt == existing().updatedAt)
             && isAdmin()
@@ -290,7 +309,7 @@ service cloud.firestore {
     match /tracks/{trackId} {
       // 1. Public read & list for all users (including guests and OBS) for active/catalog statuses
       allow get: if isValidId(trackId);
-      allow list: if existing().status in [
+      allow list: if isValidId(trackId) || existing().communityVotesCount >= 0 || existing().status in [
           'in_queue', 'on_air', 'reviewed', 'community_catalog',
           'queued', 'playing', 'reviewing'
         ] || (isSignedIn() && existing().submittedBy == request.auth.uid);
@@ -334,12 +353,14 @@ service cloud.firestore {
               'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl', 'youtubeUrl', 'youtubeId', 'genre', 'status', 'updatedAt'
             ])
           ) ||
-          // Action 2: Community rating or Studio verdict/status update
+          // Action 2: Community rating, batch Top-24 rank recalculation, or Studio verdict/status update
           (
             existing().status in ['in_queue', 'on_air', 'reviewed', 'community_catalog', 'queued', 'playing', 'reviewing']
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'youtubeUrl', 'youtubeId', 'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
-              'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore', 'updatedAt'
+              'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore',
+              'currentRank', 'previousRank', 'lastRankUpdate', 'criteriaBreakdown',
+              'updatedAt'
             ])
           ) ||
           // Action 3: Admin / Host full update
@@ -361,7 +382,7 @@ service cloud.firestore {
           && isValidId(reviewId)
           && isValidReview(incoming(), trackId, reviewId)
           && incoming().authorId == request.auth.uid
-          && incoming().helpfulCount == 1
+          && incoming().helpfulCount in [0, 1]
           && incoming().createdAt == request.time
           && exists(/databases/$(database)/documents/tracks/$(trackId));
 
@@ -375,8 +396,18 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && (
             (
-              incoming().diff(existing()).affectedKeys().hasOnly(['helpfulCount'])
-              && incoming().helpfulCount == existing().helpfulCount + 1
+              request.auth.uid != existing().authorId
+              && incoming().diff(existing()).affectedKeys().hasOnly(['helpfulCount', 'helpfulVoterIds'])
+              && (
+                (
+                  incoming().helpfulCount == existing().helpfulCount + 1
+                  && request.auth.uid in incoming().helpfulVoterIds
+                ) ||
+                (
+                  incoming().helpfulCount == existing().helpfulCount - 1
+                  && !(request.auth.uid in incoming().helpfulVoterIds)
+                )
+              )
             ) ||
             isAdmin()
           );
@@ -385,6 +416,14 @@ service cloud.firestore {
           isAdmin() || (isSignedIn() && existing().authorId == request.auth.uid)
         );
       }
+    }
+
+    // =========================================================================
+    // Collection Group Rules: /{path=**}/reviews/{reviewId}
+    // =========================================================================
+    match /{path=**}/reviews/{reviewId} {
+      allow get: if isValidId(reviewId);
+      allow list: if isValidId(reviewId) || existing().helpfulCount >= 0 || existing().totalScore >= 0;
     }
 
     // =========================================================================

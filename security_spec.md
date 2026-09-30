@@ -7,7 +7,7 @@
 3. **User Identity & Privilege Escalation Guard (`/users/{userId}`)**:
    - Users can only create their own profile (`userId == request.auth.uid` and `incoming().uid == request.auth.uid`).
    - Upon creation, regular users cannot self-assign privileged roles or inflated vote weights: `role == 'viewer'`, `xp == 0`, `voteWeight == 1.0`. Admins (`hardsize@mail.ru` or `/admins/{uid}`) can initialize their profile with `role == 'admin'`, `voteWeight == 5.0`, `xp == 5000`, `level == 10`.
-   - Profile updates by owners can only modify `displayName`, `avatarUrl`, `xp`, `reviewsCount`, `helpfulVotesReceived`, and `updatedAt`. RBAC fields (`role`, `voteWeight`, `level`) can only be updated by `isAdmin()`.
+   - Profile updates by owners can modify `displayName`, `avatarUrl`, `xp`, `level`, `reviewsCount`, `helpfulVotesReceived`, and `updatedAt` while keeping `role` and `voteWeight` immutable. Peer helpful-vote updates can modify `xp`, `level`, `helpfulVotesReceived`, and `updatedAt` while keeping `role` and `voteWeight` immutable. RBAC fields (`role`, `voteWeight`) can only be modified by `isAdmin()`.
    - Only `isAdmin()` can delete user documents (`allow delete: if isAdmin()`).
 4. **CriteriaScores Matrix Invariant**:
    - Any `CriteriaScores` map (`expertScore`, `communityScore`, `liveExpertDraft`) must strictly contain only the 5 keys `['lyrics', 'flow', 'production', 'identity', 'vibe']`, and each value must be a number between `1` and `10`.

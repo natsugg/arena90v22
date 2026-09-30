@@ -10,6 +10,9 @@ import {
   getDocs,
   updateDoc,
   deleteDoc,
+  writeBatch,
+  arrayUnion,
+  arrayRemove,
   increment,
   serverTimestamp,
 } from 'firebase/firestore';
@@ -23,9 +26,15 @@ import {
 import { extractYouTubeId } from '../lib/youtube';
 import {
   calculateAverageScore,
+  calculateCriteriaBreakdown,
+  calculateFairTrackRating,
   calculateMetaScore,
+  calculateUserLevel,
   computeUpdatedCommunityScores,
+  normalizeScoreToTen,
   recalculateCommunityScoresFromReviews,
+  sortTracksForTopChart,
+  toTimestampMillis,
   getArtistIdFromName,
   DEFAULT_ROLE_VOTE_WEIGHTS,
   type ArtistProfile,
@@ -104,18 +113,15 @@ export function generateRandomStreamKey(): string {
   const chars =
     'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const randomValues = new Uint32Array(24);
-  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
-    window.crypto.getRandomValues(randomValues);
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(randomValues);
     return (
       'sk_' +
       Array.from(randomValues, (v) => chars[v % chars.length]).join('')
     );
   }
-  let result = 'sk_';
-  for (let i = 0; i < 24; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
+  const seed = Date.now().toString(36);
+  return `sk_${seed}_${seed}`;
 }
 
 export const INITIAL_LIVE_SESSION: LiveSession = {
@@ -291,7 +297,6 @@ export interface UseLiveSessionResult {
   submitNewTrack: (input: SubmitNewTrackInput) => Promise<Track>;
   launchTrackOnAir: (trackOrId: string | Track) => Promise<void>;
   selectActiveTrack: (trackOrId: string | Track) => Promise<void>;
-  updateCommunityPrediction: (communityAvg: number) => Promise<void>;
   submitTrackReview: (input: SubmitReviewInput) => Promise<TrackReview>;
   toggleReviewHelpful: (reviewId: string, trackId?: string) => Promise<void>;
   deleteTrack: (trackId: string) => Promise<void>;
@@ -337,14 +342,15 @@ async function ensureUserProfileInFirestore(
     }
 
     if (!snap.exists()) {
+      const initialXp = isAdminUser ? 5000 : 0;
       await setDoc(userRef, {
         uid,
         displayName: (
           displayName || (isAdminUser ? 'ადმინისტრატორი' : 'ქართველი მუსიკოსი')
         ).slice(0, 80),
         role: isAdminUser ? 'admin' : 'viewer',
-        xp: isAdminUser ? 5000 : 0,
-        level: isAdminUser ? 10 : 1,
+        xp: initialXp,
+        level: calculateUserLevel(initialXp),
         voteWeight: isAdminUser ? 5.0 : 1.0,
         reviewsCount: 0,
         helpfulVotesReceived: 0,
@@ -667,14 +673,23 @@ export function useLiveSession(
       (snapshot) => {
         const firestoreTracks: Track[] = snapshot.docs.map((docSnap) => {
           const d = docSnap.data() as Omit<Track, 'id'>;
-          const createdMs =
-            typeof d.createdAt === 'number'
-              ? d.createdAt
-              : d.createdAt &&
-                  typeof (d.createdAt as { toMillis?: () => number }).toMillis ===
-                    'function'
-                ? (d.createdAt as { toMillis: () => number }).toMillis()
-                : Date.now();
+          const createdMs = toTimestampMillis(d.createdAt) || Date.now();
+          const normalizedMeta =
+            typeof d.metaScore === 'number' && d.metaScore > 0
+              ? normalizeScoreToTen(d.metaScore)
+              : null;
+          const normalizedPeople =
+            typeof d.peopleScore === 'number' && d.peopleScore > 0
+              ? normalizeScoreToTen(d.peopleScore)
+              : typeof d.communityTotalScore === 'number' &&
+                  d.communityTotalScore > 0
+                ? normalizeScoreToTen(d.communityTotalScore)
+                : null;
+          const resolvedBreakdown =
+            d.criteriaBreakdown && isValidCriteriaScores(d.criteriaBreakdown)
+              ? d.criteriaBreakdown
+              : calculateCriteriaBreakdown(d.expertScore, d.communityScore);
+
           return {
             ...d,
             id: docSnap.id,
@@ -687,6 +702,18 @@ export function useLiveSession(
               d.youtubeId ||
               resolveTrackYouTubeFields(d).youtubeId ||
               undefined,
+            metaScore: normalizedMeta,
+            peopleScore: normalizedPeople,
+            currentRank:
+              typeof d.currentRank === 'number' && d.currentRank >= 1
+                ? d.currentRank
+                : undefined,
+            previousRank:
+              typeof d.previousRank === 'number' && d.previousRank >= 1
+                ? d.previousRank
+                : undefined,
+            lastRankUpdate: d.lastRankUpdate,
+            criteriaBreakdown: resolvedBreakdown,
             createdAt: createdMs,
           };
         });
@@ -1430,6 +1457,69 @@ export function useLiveSession(
     ]
   );
 
+  /**
+   * ითვლის Top-24 ჩარტის პოზიციების ცვლილებას და აბრუნებს განახლებულ ტრეკების მასივსა და სხვაობების რუკას.
+   */
+  const computeTopChartRankChanges = useCallback(
+    (
+      tracksBefore: Track[],
+      updatedTargetTrack: Track
+    ): {
+      nextTracks: Track[];
+      updatedTargetWithRank: Track;
+      shiftedRanks: Map<string, { previousRank: number; currentRank: number }>;
+    } => {
+      const sortedBefore = sortTracksForTopChart(tracksBefore);
+      const oldRankByTrackId = new Map<string, number>();
+      sortedBefore.forEach((t, idx) => {
+        oldRankByTrackId.set(t.id, t.currentRank ?? idx + 1);
+      });
+
+      const candidateTracks = tracksBefore.map((t) =>
+        t.id === updatedTargetTrack.id ? updatedTargetTrack : t
+      );
+      const sortedAfter = sortTracksForTopChart(candidateTracks);
+      const shiftedRanks = new Map<
+        string,
+        { previousRank: number; currentRank: number }
+      >();
+
+      sortedAfter.slice(0, 24).forEach((t, newIndex) => {
+        const newRank = newIndex + 1;
+        const oldRank = oldRankByTrackId.get(t.id) ?? t.currentRank ?? newRank;
+        if (oldRank !== newRank) {
+          shiftedRanks.set(t.id, {
+            previousRank: oldRank,
+            currentRank: newRank,
+          });
+        }
+      });
+
+      const nowMs = Date.now();
+      const nextTracks = candidateTracks.map((t) => {
+        const shift = shiftedRanks.get(t.id);
+        if (!shift) return t;
+        return {
+          ...t,
+          previousRank: shift.previousRank,
+          currentRank: shift.currentRank,
+          lastRankUpdate: nowMs,
+        };
+      });
+
+      const updatedTargetWithRank =
+        nextTracks.find((t) => t.id === updatedTargetTrack.id) ??
+        updatedTargetTrack;
+
+      return {
+        nextTracks,
+        updatedTargetWithRank,
+        shiftedRanks,
+      };
+    },
+    []
+  );
+
   const lockInVerdict = useCallback(
     async (finalScores: CriteriaScores) => {
       if (draftDebounceRef.current) {
@@ -1445,35 +1535,66 @@ export function useLiveSession(
 
       const communityScores = currentTrack?.communityScore ?? null;
       const computedMeta =
-        calculateMetaScore(finalScores, communityScores) ??
-        Math.round(expertAvg * 10);
+        calculateMetaScore(finalScores, communityScores) ?? expertAvg;
+      const computedBreakdown = calculateCriteriaBreakdown(
+        finalScores,
+        communityScores
+      );
 
       let updatedTracks = tracksQueue;
       let updatedActiveTrack: Track | null = currentTrack;
 
       if (currentTrack) {
-        updatedActiveTrack = {
+        const baseUpdatedTrack: Track = {
           ...currentTrack,
           status: 'reviewed',
           expertScore: finalScores,
           expertTotalScore: expertAvg,
           metaScore: computedMeta,
+          criteriaBreakdown: computedBreakdown,
           updatedAt: Date.now(),
         };
-        updatedTracks = tracksQueue.map((t) =>
-          t.id === currentTrack.id ? updatedActiveTrack! : t
-        );
+
+        const { nextTracks, updatedTargetWithRank, shiftedRanks } =
+          computeTopChartRankChanges(tracksQueue, baseUpdatedTrack);
+
+        updatedActiveTrack = updatedTargetWithRank;
+        updatedTracks = nextTracks;
         setActiveTrack(updatedActiveTrack);
         setTracksQueue(updatedTracks);
+
         if (auth.currentUser) {
           try {
-            await updateDoc(doc(db, 'tracks', currentTrack.id), {
+            const batch = writeBatch(db);
+            const targetShift = shiftedRanks.get(currentTrack.id);
+            const updatePayload: Record<string, unknown> = {
               status: 'reviewed',
               expertScore: finalScores,
               expertTotalScore: expertAvg,
               metaScore: computedMeta,
               updatedAt: serverTimestamp(),
+            };
+            if (computedBreakdown) {
+              updatePayload.criteriaBreakdown = computedBreakdown;
+            }
+            if (targetShift) {
+              updatePayload.previousRank = targetShift.previousRank;
+              updatePayload.currentRank = targetShift.currentRank;
+              updatePayload.lastRankUpdate = serverTimestamp();
+            }
+            batch.update(doc(db, 'tracks', currentTrack.id), updatePayload);
+
+            shiftedRanks.forEach((shift, shiftedTrackId) => {
+              if (shiftedTrackId === currentTrack.id) return;
+              batch.update(doc(db, 'tracks', shiftedTrackId), {
+                previousRank: shift.previousRank,
+                currentRank: shift.currentRank,
+                lastRankUpdate: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
             });
+
+            await batch.commit();
           } catch {
             void syncTrackToFirestore(updatedActiveTrack, false);
           }
@@ -1528,6 +1649,7 @@ export function useLiveSession(
       tracksQueue,
       reviews,
       topCritics,
+      computeTopChartRankChanges,
       syncSessionToFirestore,
       syncTrackToFirestore,
     ]
@@ -1899,57 +2021,6 @@ export function useLiveSession(
     [launchTrackOnAir]
   );
 
-  const updateCommunityPrediction = useCallback(
-    async (communityAvg: number) => {
-      const rounded = Math.round(communityAvg * 10) / 10;
-      const currentSession = session ?? INITIAL_LIVE_SESSION;
-      const currentTrack = activeTrack;
-
-      let updatedTracks = tracksQueue;
-      if (currentTrack) {
-        const updatedTrack: Track = {
-          ...currentTrack,
-          communityTotalScore: rounded,
-          communityVotesCount: (currentTrack.communityVotesCount || 0) + 1,
-          updatedAt: Date.now(),
-        };
-        setActiveTrack(updatedTrack);
-        updatedTracks = tracksQueue.map((t) =>
-          t.id === currentTrack.id ? updatedTrack : t
-        );
-        setTracksQueue(updatedTracks);
-      }
-
-      const nextSession: LiveSession = {
-        ...currentSession,
-        activeTrackSnapshot: currentSession.activeTrackSnapshot
-          ? {
-              ...currentSession.activeTrackSnapshot,
-              communityTotalScore: rounded,
-            }
-          : null,
-        updatedAt: Date.now(),
-      };
-
-      setSession(nextSession);
-      broadcastStateUpdate({
-        session: nextSession,
-        tracks: updatedTracks,
-        reviews,
-        critics: topCritics,
-      });
-      await syncSessionToFirestore(nextSession);
-    },
-    [
-      session,
-      activeTrack,
-      tracksQueue,
-      reviews,
-      topCritics,
-      syncSessionToFirestore,
-    ]
-  );
-
   const submitTrackReview = useCallback(
     async (input: SubmitReviewInput): Promise<TrackReview> => {
       const targetTrack = tracksQueue.find((t) => t.id === input.trackId);
@@ -1985,8 +2056,8 @@ export function useLiveSession(
         scores: input.scores,
         totalScore: reviewAvg,
         text: input.text.trim().slice(0, 3000),
-        helpfulCount: 1,
-        helpfulVoterIds: [authorId],
+        helpfulCount: 0,
+        helpfulVoterIds: [],
         createdAt: Date.now(),
       };
 
@@ -1995,22 +2066,31 @@ export function useLiveSession(
         input.scores,
         voteWeight
       );
+      const computedBreakdown = calculateCriteriaBreakdown(
+        targetTrack.expertScore,
+        recalculated.communityScore
+      );
 
-      const updatedTrack: Track = {
+      const baseUpdatedTrack: Track = {
         ...targetTrack,
         communityScore: recalculated.communityScore,
         communityTotalScore: recalculated.communityTotalScore,
+        peopleScore: recalculated.communityTotalScore,
         communityVotesCount: recalculated.communityVotesCount,
+        reviewsCount: recalculated.communityVotesCount,
         metaScore: recalculated.metaScore,
+        criteriaBreakdown: computedBreakdown,
         updatedAt: Date.now(),
       };
 
-      const nextTracks = tracksQueue.map((t) =>
-        t.id === updatedTrack.id ? updatedTrack : t
-      );
+      const {
+        nextTracks: optimisticNextTracks,
+        updatedTargetWithRank: updatedTrack,
+      } = computeTopChartRankChanges(tracksQueue, baseUpdatedTrack);
+
       const nextReviews = [newReview, ...reviews];
 
-      setTracksQueue(nextTracks);
+      setTracksQueue(optimisticNextTracks);
       setReviews(nextReviews);
       if (activeTrack?.id === updatedTrack.id) {
         setActiveTrack(updatedTrack);
@@ -2048,7 +2128,7 @@ export function useLiveSession(
       setSession(nextSession);
       broadcastStateUpdate({
         session: nextSession,
-        tracks: nextTracks,
+        tracks: optimisticNextTracks,
         reviews: nextReviews,
       });
 
@@ -2075,7 +2155,8 @@ export function useLiveSession(
               scores: input.scores,
               totalScore: reviewAvg,
               text: newReview.text,
-              helpfulCount: 1,
+              helpfulCount: 0,
+              helpfulVoterIds: [],
               createdAt: serverTimestamp(),
             }
           );
@@ -2087,7 +2168,7 @@ export function useLiveSession(
           }
         }
 
-        // ხელახლა გადავითვალოთ შეწონილი რეიტინგი პირდაპირ `tracks/{id}/reviews` ქვეკოლექციის დოკუმენტებიდან
+        // ხელახლა გადავითვალოთ შეწონილი რეიტინგი და Top-24 დინამიკა პაკეტური ჩაწერით (writeBatch)
         try {
           const allReviewsSnap = await getDocs(
             collection(db, 'tracks', targetTrack.id, 'reviews')
@@ -2117,7 +2198,31 @@ export function useLiveSession(
                   reviewsCount: recalculated.communityVotesCount,
                 };
 
-          await updateDoc(trackRef, {
+          const exactBreakdown = calculateCriteriaBreakdown(
+            targetTrack.expertScore,
+            exactRecalculated.communityScore
+          );
+
+          const exactUpdatedTrack: Track = {
+            ...targetTrack,
+            communityScore: exactRecalculated.communityScore,
+            communityTotalScore: exactRecalculated.communityTotalScore,
+            peopleScore: exactRecalculated.peopleScore,
+            communityVotesCount: exactRecalculated.communityVotesCount,
+            reviewsCount: exactRecalculated.reviewsCount,
+            metaScore: exactRecalculated.metaScore,
+            criteriaBreakdown: exactBreakdown,
+            updatedAt: Date.now(),
+          };
+
+          const { shiftedRanks } = computeTopChartRankChanges(
+            tracksQueue,
+            exactUpdatedTrack
+          );
+
+          const batch = writeBatch(db);
+          const targetShift = shiftedRanks.get(targetTrack.id);
+          const trackUpdatePayload: Record<string, unknown> = {
             communityScore: exactRecalculated.communityScore,
             communityTotalScore: exactRecalculated.communityTotalScore,
             peopleScore: exactRecalculated.peopleScore,
@@ -2125,7 +2230,29 @@ export function useLiveSession(
             reviewsCount: exactRecalculated.reviewsCount,
             metaScore: exactRecalculated.metaScore,
             updatedAt: serverTimestamp(),
+          };
+          if (exactBreakdown) {
+            trackUpdatePayload.criteriaBreakdown = exactBreakdown;
+          }
+          if (targetShift) {
+            trackUpdatePayload.previousRank = targetShift.previousRank;
+            trackUpdatePayload.currentRank = targetShift.currentRank;
+            trackUpdatePayload.lastRankUpdate = serverTimestamp();
+          }
+
+          batch.update(trackRef, trackUpdatePayload);
+
+          shiftedRanks.forEach((shift, shiftedTrackId) => {
+            if (shiftedTrackId === targetTrack.id) return;
+            batch.update(doc(db, 'tracks', shiftedTrackId), {
+              previousRank: shift.previousRank,
+              currentRank: shift.currentRank,
+              lastRankUpdate: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
           });
+
+          await batch.commit();
         } catch (err) {
           try {
             handleFirestoreError(err, OperationType.UPDATE, trackPath);
@@ -2134,13 +2261,21 @@ export function useLiveSession(
           }
         }
 
-        // განვაახლოთ კრიტიკოსის XP და რეცენზიების მრიცხველი `/users/{uid}` დოკუმენტში
+        // განვაახლოთ კრიტიკოსის XP (+120), დონე (level) და რეცენზიების მრიცხველი `/users/{uid}` დოკუმენტში
         try {
           const userRef = doc(db, 'users', auth.currentUser.uid);
+          const userSnap = await getDoc(userRef);
+          const currentXp =
+            userSnap.exists() && typeof userSnap.data().xp === 'number'
+              ? userSnap.data().xp
+              : (activeProfile?.xp ?? 0);
+          const nextXp = Math.max(0, currentXp + 120);
+          const nextLevel = calculateUserLevel(nextXp);
+
           await updateDoc(userRef, {
             xp: increment(120),
+            level: nextLevel,
             reviewsCount: increment(1),
-            helpfulVotesReceived: increment(1),
             updatedAt: serverTimestamp(),
           });
         } catch {
@@ -2150,7 +2285,14 @@ export function useLiveSession(
 
       return newReview;
     },
-    [tracksQueue, reviews, activeTrack?.id, session, currentUserProfile]
+    [
+      tracksQueue,
+      reviews,
+      activeTrack?.id,
+      session,
+      currentUserProfile,
+      computeTopChartRankChanges,
+    ]
   );
 
   const deleteTrack = useCallback(
@@ -2248,7 +2390,11 @@ export function useLiveSession(
           remainingFromFirestore,
           targetTrack.expertScore
         );
-        const updatedTrack: Track = {
+        const computedBreakdown = calculateCriteriaBreakdown(
+          targetTrack.expertScore,
+          recalculated.communityScore
+        );
+        const baseUpdatedTrack: Track = {
           ...targetTrack,
           communityScore: recalculated.communityScore,
           communityTotalScore: recalculated.communityTotalScore,
@@ -2256,27 +2402,50 @@ export function useLiveSession(
           communityVotesCount: recalculated.communityVotesCount,
           reviewsCount: recalculated.reviewsCount,
           metaScore: recalculated.metaScore,
+          criteriaBreakdown: computedBreakdown,
           updatedAt: Date.now(),
         };
 
-        const nextTracks = tracksQueue.map((t) =>
-          t.id === trackId ? updatedTrack : t
-        );
+        const { nextTracks, updatedTargetWithRank, shiftedRanks } =
+          computeTopChartRankChanges(tracksQueue, baseUpdatedTrack);
+
         setTracksQueue(nextTracks);
         if (activeTrack?.id === trackId) {
-          setActiveTrack(updatedTrack);
+          setActiveTrack(updatedTargetWithRank);
         }
 
         try {
-          await updateDoc(doc(db, 'tracks', trackId), {
+          const batch = writeBatch(db);
+          const targetShift = shiftedRanks.get(trackId);
+          const trackUpdatePayload: Record<string, unknown> = {
             communityScore: recalculated.communityScore,
             communityTotalScore: recalculated.communityTotalScore,
             peopleScore: recalculated.peopleScore,
             communityVotesCount: recalculated.communityVotesCount,
             reviewsCount: recalculated.reviewsCount,
             metaScore: recalculated.metaScore,
+            criteriaBreakdown: computedBreakdown ?? null,
             updatedAt: serverTimestamp(),
+          };
+          if (targetShift) {
+            trackUpdatePayload.previousRank = targetShift.previousRank;
+            trackUpdatePayload.currentRank = targetShift.currentRank;
+            trackUpdatePayload.lastRankUpdate = serverTimestamp();
+          }
+
+          batch.update(doc(db, 'tracks', trackId), trackUpdatePayload);
+
+          shiftedRanks.forEach((shift, shiftedTrackId) => {
+            if (shiftedTrackId === trackId) return;
+            batch.update(doc(db, 'tracks', shiftedTrackId), {
+              previousRank: shift.previousRank,
+              currentRank: shift.currentRank,
+              lastRankUpdate: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
           });
+
+          await batch.commit();
         } catch (err) {
           try {
             handleFirestoreError(err, OperationType.UPDATE, `tracks/${trackId}`);
@@ -2286,56 +2455,114 @@ export function useLiveSession(
         }
       }
     },
-    [reviews, tracksQueue, activeTrack?.id]
+    [reviews, tracksQueue, activeTrack?.id, computeTopChartRankChanges]
   );
 
   const toggleReviewHelpful = useCallback(
     async (reviewId: string, explicitTrackId?: string) => {
-      const voterId = auth.currentUser?.uid ?? 'local_visitor';
-      let targetTrackId: string | null = explicitTrackId ?? null;
-      let delta = 1;
+      const currentUserId = auth.currentUser?.uid;
+      if (!currentUserId) return;
 
-      const nextReviews = reviews.map((rev) => {
-        if (rev.id !== reviewId) return rev;
-        targetTrackId = rev.trackId;
-        const voters = rev.helpfulVoterIds ?? [];
-        const alreadyVoted = voters.includes(voterId);
-        delta = alreadyVoted ? -1 : 1;
-        return {
-          ...rev,
-          helpfulCount: Math.max(0, rev.helpfulCount + delta),
-          helpfulVoterIds: alreadyVoted
-            ? voters.filter((id) => id !== voterId)
-            : [...voters, voterId],
-        };
-      });
+      const existingReview = reviews.find((r) => r.id === reviewId);
+      if (existingReview && existingReview.authorId === currentUserId) {
+        // ავტორს ეკრძალება საკუთარ რეცენზიაზე ხმის მიცემა
+        return;
+      }
 
-      setReviews(nextReviews);
-      broadcastStateUpdate({
-        session: session ?? INITIAL_LIVE_SESSION,
-        tracks: tracksQueue,
-        reviews: nextReviews,
-      });
+      let targetTrackId: string | null =
+        existingReview?.trackId ?? explicitTrackId ?? null;
+      let targetAuthorId: string | null = existingReview?.authorId ?? null;
+      let alreadyVoted = existingReview
+        ? (existingReview.helpfulVoterIds ?? []).includes(currentUserId)
+        : false;
 
-      if (auth.currentUser && targetTrackId && delta === 1) {
-        const reviewPath = `tracks/${targetTrackId}/reviews/${reviewId}`;
-        try {
-          await updateDoc(
-            doc(db, 'tracks', targetTrackId, 'reviews', reviewId),
-            {
-              helpfulCount: increment(1),
-            }
-          );
-        } catch (err) {
-          try {
-            handleFirestoreError(err, OperationType.UPDATE, reviewPath);
-          } catch {
-            // logged by handleFirestoreError
+      if (existingReview) {
+        const delta = alreadyVoted ? -1 : 1;
+        const nextReviews = reviews.map((rev) => {
+          if (rev.id !== reviewId) return rev;
+          const voters = rev.helpfulVoterIds ?? [];
+          return {
+            ...rev,
+            helpfulCount: Math.max(0, rev.helpfulCount + delta),
+            helpfulVoterIds: alreadyVoted
+              ? voters.filter((id) => id !== currentUserId)
+              : [...voters, currentUserId],
+          };
+        });
+
+        setReviews(nextReviews);
+        broadcastStateUpdate({
+          session: session ?? INITIAL_LIVE_SESSION,
+          tracks: tracksQueue,
+          reviews: nextReviews,
+        });
+      }
+
+      if (!targetTrackId) return;
+
+      const reviewPath = `tracks/${targetTrackId}/reviews/${reviewId}`;
+      const reviewRef = doc(db, 'tracks', targetTrackId, 'reviews', reviewId);
+
+      try {
+        if (!existingReview) {
+          const revSnap = await getDoc(reviewRef);
+          if (!revSnap.exists()) return;
+          const revData = revSnap.data();
+          targetAuthorId =
+            typeof revData.authorId === 'string' ? revData.authorId : null;
+          if (targetAuthorId === currentUserId) {
+            return;
           }
+          const remoteVoters = Array.isArray(revData.helpfulVoterIds)
+            ? (revData.helpfulVoterIds as string[])
+            : [];
+          alreadyVoted = remoteVoters.includes(currentUserId);
+        }
+
+        if (alreadyVoted) {
+          await updateDoc(reviewRef, {
+            helpfulCount: increment(-1),
+            helpfulVoterIds: arrayRemove(currentUserId),
+          });
+        } else {
+          await updateDoc(reviewRef, {
+            helpfulCount: increment(1),
+            helpfulVoterIds: arrayUnion(currentUserId),
+          });
+        }
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.UPDATE, reviewPath);
+        } catch {
+          // logged by handleFirestoreError
+        }
+        return;
+      }
+
+      if (targetAuthorId && targetAuthorId !== currentUserId) {
+        try {
+          const authorRef = doc(db, 'users', targetAuthorId);
+          const authorSnap = await getDoc(authorRef);
+          const currentAuthorXp =
+            authorSnap.exists() && typeof authorSnap.data().xp === 'number'
+              ? authorSnap.data().xp
+              : (firestoreUsers.find((u) => u.uid === targetAuthorId)?.xp ?? 0);
+          const xpDelta = alreadyVoted ? -25 : 25;
+          const nextAuthorXp = Math.max(0, currentAuthorXp + xpDelta);
+          const nextAuthorLevel = calculateUserLevel(nextAuthorXp);
+
+          await updateDoc(authorRef, {
+            helpfulVotesReceived: increment(alreadyVoted ? -1 : 1),
+            xp: increment(xpDelta),
+            level: nextAuthorLevel,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // ignore if author profile does not exist or update is restricted
         }
       }
     },
-    [reviews, session, tracksQueue]
+    [reviews, session, tracksQueue, firestoreUsers]
   );
 
   const updateObsSettings = useCallback(
@@ -2509,7 +2736,6 @@ export function useLiveSession(
     submitNewTrack,
     launchTrackOnAir,
     selectActiveTrack,
-    updateCommunityPrediction,
     submitTrackReview,
     toggleReviewHelpful,
     deleteTrack,

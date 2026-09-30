@@ -14,14 +14,14 @@ import {
   User as UserIcon,
 } from 'lucide-react';
 import { i18n } from '../lib/i18n';
+import TopChart from '../components/TopChart';
 import { useLiveSession, PRESET_COVERS } from '../hooks/useLiveSession';
 import {
-  calculateAverageScore,
   calculateFairTrackRating,
   canUserPublishTrack,
   getArtistIdFromName,
+  toTimestampMillis,
   CRITERIA_KEYS,
-  type Track,
 } from '../types';
 import { auth } from '../lib/firebase';
 
@@ -86,8 +86,7 @@ export default function HomePage({
     return tracksQueue
       .filter((track) => {
         if (activeTab === 'monthly') {
-          const createdMs =
-            typeof track.createdAt === 'number' ? track.createdAt : Date.now();
+          const createdMs = toTimestampMillis(track.createdAt) || Date.now();
           if (createdMs < thirtyDaysAgo) return false;
         }
         if (selectedGenre !== 'all' && track.genre !== selectedGenre) {
@@ -468,11 +467,16 @@ export default function HomePage({
 
                         <button
                           type="button"
-                          onClick={() => void toggleReviewHelpful(rev.id)}
-                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                            isHelpfulVoted
-                              ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
-                              : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                          disabled={rev.authorId === currentVoterId}
+                          onClick={() =>
+                            void toggleReviewHelpful(rev.id, rev.trackId)
+                          }
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap ${
+                            rev.authorId === currentVoterId
+                              ? 'bg-[#0B0F17] border-zinc-800/60 text-zinc-500 cursor-not-allowed opacity-70'
+                              : isHelpfulVoted
+                                ? 'bg-amber-500/15 border-amber-500/50 text-amber-300 cursor-pointer'
+                                : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700 cursor-pointer'
                           }`}
                         >
                           <ThumbsUp className="w-3.5 h-3.5" />
@@ -487,171 +491,16 @@ export default function HomePage({
                 })}
               </div>
             )
-          ) : loading && tracksQueue.length === 0 ? (
-            /* ჩატვირთვის სკელეტონი */
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 animate-pulse">
-              {[1, 2, 3, 4].map((item) => (
-                <div
-                  key={item}
-                  className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-5 space-y-4"
-                >
-                  <div className="flex items-start gap-4">
-                    <div className="w-20 h-20 rounded-xl bg-zinc-800/80 shrink-0" />
-                    <div className="flex-1 space-y-2.5 pt-1">
-                      <div className="h-3.5 w-24 bg-zinc-800/80 rounded" />
-                      <div className="h-5 w-40 bg-zinc-800/80 rounded" />
-                      <div className="h-3.5 w-28 bg-zinc-800/80 rounded" />
-                    </div>
-                  </div>
-                  <div className="pt-3.5 border-t border-zinc-800/80 flex justify-between">
-                    <div className="h-6 w-24 bg-zinc-800/80 rounded" />
-                    <div className="h-4 w-20 bg-zinc-800/80 rounded" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : sortedTracks.length === 0 ? (
-            /* ცარიელი მდგომარეობა, როცა კატალოგში ტრეკები ჯერ არ არის */
-            <div className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-10 text-center space-y-4">
-              <p className="text-sm md:text-base font-medium text-zinc-200">
-                კატალოგში ტრეკები ჯერ არ არის. წარადგინეთ პირველი რელიზი!
-              </p>
-              {onOpenSubmitModal && canPublishTrack ? (
-                <div>
-                  <button
-                    type="button"
-                    onClick={onOpenSubmitModal}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-xl transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>{i18n.phrases.submitTrack}</span>
-                  </button>
-                </div>
-              ) : (
-                <p className="text-xs text-zinc-500">
-                  {i18n.phrases.accessRestricted} · {i18n.phrases.expertsOnly}
-                </p>
-              )}
-            </div>
           ) : (
-            /* ტოპ 24 ტრეკის ბარათების ბადე */
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-              {sortedTracks.map((track: Track, index: number) => {
-                const rank = index + 1;
-                const expertTotal =
-                  track.expertTotalScore ??
-                  (track.expertScore
-                    ? calculateAverageScore(track.expertScore)
-                    : null);
-                const communityTotal =
-                  track.communityTotalScore ??
-                  (track.communityScore
-                    ? calculateAverageScore(track.communityScore)
-                    : null);
-                const fairRating = calculateFairTrackRating(track);
-                const trackReviewCount = reviews.filter(
-                  (r) => r.trackId === track.id
-                ).length;
-                const resolvedArtistId =
-                  track.artistId || getArtistIdFromName(track.artist);
-
-                return (
-                  <div
-                    key={track.id}
-                    onClick={() => handleOpenTrack(track.id)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        handleOpenTrack(track.id);
-                      }
-                    }}
-                    className="group border border-zinc-800/90 bg-[#111723] hover:border-zinc-700 rounded-2xl p-5 transition-colors cursor-pointer flex flex-col justify-between gap-4"
-                  >
-                    <div className="flex items-start gap-4">
-                      {/* რანგის ნომერი და გარეკანი */}
-                      <div className="relative w-20 h-20 rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shrink-0 flex items-center justify-center">
-                        <img
-                          src={track.coverUrl || PRESET_COVERS.vinyl}
-                          alt={track.title}
-                          referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            e.currentTarget.onerror = null;
-                            e.currentTarget.src = PRESET_COVERS.vinyl;
-                          }}
-                          className="w-full h-full object-cover"
-                        />
-                        <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-zinc-950/85 text-[11px] font-mono-tabular font-bold text-amber-400">
-                          #{rank < 10 ? `0${rank}` : rank}
-                        </div>
-                      </div>
-
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex items-center gap-1.5 text-xs text-zinc-400 truncate">
-                          <span>{track.genre || 'ქართული სცენა'}</span>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-mono-tabular text-zinc-300">
-                            ★ {fairRating.toFixed(2)}
-                          </span>
-                        </div>
-
-                        <h3 className="text-base font-bold text-zinc-100 group-hover:text-amber-400 transition-colors truncate">
-                          {track.title}
-                        </h3>
-
-                        <div className="flex items-center gap-1.5 text-xs text-zinc-400 truncate">
-                          <span>{i18n.ui.artist}:</span>
-                          <button
-                            type="button"
-                            onClick={(e) =>
-                              handleOpenArtist(resolvedArtistId, e)
-                            }
-                            className="text-zinc-200 font-medium hover:text-amber-400 hover:underline truncate cursor-pointer"
-                          >
-                            {track.artist}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* ქულების და რეცენზიების ზოლი */}
-                    <div className="pt-3.5 border-t border-zinc-800/80 flex items-center justify-between gap-3 text-xs">
-                      <div className="flex items-center gap-4">
-                        <div>
-                          <span className="block text-[11px] text-zinc-500">
-                            {i18n.portal.expertScoreLabel}
-                          </span>
-                          <span className="font-mono-tabular text-sm font-bold text-amber-400">
-                            {expertTotal !== null
-                              ? expertTotal.toFixed(1)
-                              : '—'}
-                          </span>
-                        </div>
-
-                        <div>
-                          <span className="block text-[11px] text-zinc-500">
-                            {i18n.portal.communityScoreLabel}
-                          </span>
-                          <span className="font-mono-tabular text-sm font-bold text-emerald-400">
-                            {communityTotal !== null
-                              ? communityTotal.toFixed(1)
-                              : '—'}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="text-right text-zinc-400 font-mono-tabular">
-                        <span>
-                          {track.communityVotesCount} შეფასება ·{' '}
-                          {trackReviewCount} {i18n.portal.reviewsCountLabel}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <TopChart
+              tracks={sortedTracks}
+              reviews={reviews}
+              loading={loading && tracksQueue.length === 0}
+              canPublishTrack={canPublishTrack}
+              onSelectTrack={handleOpenTrack}
+              onSelectArtist={handleOpenArtist}
+              onOpenSubmitModal={onOpenSubmitModal}
+            />
           )}
         </div>
 

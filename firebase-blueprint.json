@@ -220,6 +220,19 @@
           "type": "number",
           "description": "Combined final MetaScore blending expertScore and communityScore."
         },
+        "currentRank": {
+          "type": "number",
+          "description": "Current rank position in the Top-24 chart."
+        },
+        "previousRank": {
+          "type": "number",
+          "description": "Previous rank position in the Top-24 chart before the latest score update."
+        },
+        "lastRankUpdate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last rank change."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

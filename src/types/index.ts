@@ -41,6 +41,32 @@ export function canUserPublishTrack(role?: UserRole | null): boolean {
 }
 
 /**
+ * გამოითვლის მომხმარებლის დონეს (Level 1–5) დაგროვილი XP-ის მიხედვით:
+ * - 0–299 XP -> დონე 1 ("ახალბედა")
+ * - 300–799 XP -> დონე 2 ("მსმენელი")
+ * - 800–1799 XP -> დონე 3 ("მელომანი")
+ * - 1800–3499 XP -> დონე 4 ("კრიტიკოსი")
+ * - 3500+ XP -> დონე 5 ("ექსპერტი")
+ */
+export function calculateUserLevel(xp: number): number {
+  const safeXp =
+    typeof xp === 'number' && !Number.isNaN(xp) ? Math.max(0, xp) : 0;
+  if (safeXp >= 3500) return 5;
+  if (safeXp >= 1800) return 4;
+  if (safeXp >= 800) return 3;
+  if (safeXp >= 300) return 2;
+  return 1;
+}
+
+export function getUserLevelLabel(level: number): string {
+  if (level >= 5) return i18n.levels[5];
+  if (level === 4) return i18n.levels[4];
+  if (level === 3) return i18n.levels[3];
+  if (level === 2) return i18n.levels[2];
+  return i18n.levels[1];
+}
+
+/**
  * მომხმარებლის პროფილი (`/users/{userId}`).
  */
 export interface User {
@@ -185,6 +211,16 @@ export interface Track {
   communityVotesCount: number;
   reviewsCount?: number;
   metaScore: number | null;
+  currentRank?: number;
+  previousRank?: number;
+  lastRankUpdate?: Timestamp | FirestoreTimestamp;
+  criteriaBreakdown?: {
+    lyrics: number;
+    flow: number;
+    production: number;
+    identity: number;
+    vibe: number;
+  };
   createdAt: FirestoreTimestamp;
   updatedAt: FirestoreTimestamp;
 }
@@ -254,9 +290,11 @@ export interface TrackReview {
   totalScore: number;
   text: string;
   helpfulCount: number;
-  helpfulVoterIds?: string[];
+  helpfulVoterIds: string[];
   createdAt: number;
 }
+
+export type Review = TrackReview;
 
 /**
  * ეთერის სტატუსი (OBS და სტუდიის სინქრონიზაციისთვის).
@@ -374,6 +412,29 @@ export function getArtistIdFromName(artistName: string): string {
 }
 
 /**
+ * უსაფრთხოდ გარდაქმნის Firestore Timestamp-ს ან რიცხვს მილიწამებად.
+ */
+export function toTimestampMillis(val: unknown): number {
+  if (typeof val === 'number' && !Number.isNaN(val)) {
+    return val;
+  }
+  if (val && typeof val === 'object') {
+    const maybeTs = val as {
+      toMillis?: () => number;
+      seconds?: number;
+      nanoseconds?: number;
+    };
+    if (typeof maybeTs.toMillis === 'function') {
+      return maybeTs.toMillis();
+    }
+    if (typeof maybeTs.seconds === 'number') {
+      return maybeTs.seconds * 1000;
+    }
+  }
+  return 0;
+}
+
+/**
  * ითვლის 5 კრიტერიუმის საშუალო არითმეტიკულ ქულას (1.0 - 10.0, მეათედებამდე დამრგვალებით).
  */
 export function calculateAverageScore(scores: CriteriaScores): number {
@@ -387,7 +448,32 @@ export function calculateAverageScore(scores: CriteriaScores): number {
 }
 
 /**
- * ითვლის საბოლოო MetaScore-ს (0–100 შკალაზე) expertScore-ის (60%) და communityScore-ის (40%) საფუძველზე.
+ * ითვლის 5 კრიტერიუმის შეჯამებულ სკალას (criteriaBreakdown) რეალური expertScore და communityScore-იდან.
+ */
+export function calculateCriteriaBreakdown(
+  expertScore: CriteriaScores | null | undefined,
+  communityScore: CriteriaScores | null | undefined
+): CriteriaScores | undefined {
+  if (!expertScore && !communityScore) return undefined;
+  if (expertScore && !communityScore) {
+    return { ...expertScore };
+  }
+  if (!expertScore && communityScore) {
+    return { ...communityScore };
+  }
+  const e = expertScore!;
+  const c = communityScore!;
+  return {
+    lyrics: Math.round((e.lyrics * 0.6 + c.lyrics * 0.4) * 10) / 10,
+    flow: Math.round((e.flow * 0.6 + c.flow * 0.4) * 10) / 10,
+    production: Math.round((e.production * 0.6 + c.production * 0.4) * 10) / 10,
+    identity: Math.round((e.identity * 0.6 + c.identity * 0.4) * 10) / 10,
+    vibe: Math.round((e.vibe * 0.6 + c.vibe * 0.4) * 10) / 10,
+  };
+}
+
+/**
+ * ითვლის საბოლოო MetaScore-ს (1.0–10.0 შკალაზე) expertScore-ის (60%) და communityScore-ის (40%) საფუძველზე.
  */
 export function calculateMetaScore(
   expertScore: CriteriaScores | null,
@@ -395,41 +481,74 @@ export function calculateMetaScore(
 ): number | null {
   if (!expertScore && !communityScore) return null;
   if (expertScore && !communityScore) {
-    return Math.round(calculateAverageScore(expertScore) * 10);
+    return calculateAverageScore(expertScore);
   }
   if (!expertScore && communityScore) {
-    return Math.round(calculateAverageScore(communityScore) * 10);
+    return calculateAverageScore(communityScore);
   }
   const expertAvg = calculateAverageScore(expertScore!);
   const communityAvg = calculateAverageScore(communityScore!);
-  return Math.round((expertAvg * 0.6 + communityAvg * 0.4) * 10);
+  return Math.round((expertAvg * 0.6 + communityAvg * 0.4) * 10) / 10;
 }
 
 /**
- * ითვლის ტრეკის სამართლიან შეწონილ რეიტინგს (Bayesian Fair Rating 1.0–10.0)
- * ტოპ-24 ლიდერბორდში დასალაგებლად (ითვალისწინებს შეფასებების რაოდენობასა და ექსპერტის წონას).
+ * ნორმალიზებას უკეთებს metaScore-ს 0–10 შკალაზე (თუ ძველ ჩანაწერში 0–100 შკალით ინახებოდა).
+ */
+export function normalizeScoreToTen(score: number | null | undefined): number {
+  if (typeof score !== 'number' || Number.isNaN(score) || score <= 0) return 0;
+  if (score > 10) {
+    return Math.round((score / 10) * 100) / 100;
+  }
+  return Math.round(score * 100) / 100;
+}
+
+/**
+ * ითვლის ტრეკის რეალურ რეიტინგს (0.0–10.0) მხოლოდ Firestore-ის რეალური მონაცემებიდან.
  */
 export function calculateFairTrackRating(track: Track): number {
-  const priorMean = 7.8;
-  const minConfidenceVotes = 25;
-
-  const communityAvg =
-    track.communityTotalScore ??
-    (track.communityScore ? calculateAverageScore(track.communityScore) : priorMean);
-  const votes = Math.max(0, track.communityVotesCount || 0);
-
-  const bayesianCommunity =
-    (votes / (votes + minConfidenceVotes)) * communityAvg +
-    (minConfidenceVotes / (votes + minConfidenceVotes)) * priorMean;
+  if (typeof track.metaScore === 'number' && track.metaScore > 0) {
+    return normalizeScoreToTen(track.metaScore);
+  }
+  if (typeof track.peopleScore === 'number' && track.peopleScore > 0) {
+    return normalizeScoreToTen(track.peopleScore);
+  }
 
   const expertAvg =
     track.expertTotalScore ??
     (track.expertScore ? calculateAverageScore(track.expertScore) : null);
 
-  if (expertAvg !== null) {
-    return Math.round((expertAvg * 0.55 + bayesianCommunity * 0.45) * 100) / 100;
+  const communityAvg =
+    track.communityTotalScore ??
+    (track.communityScore ? calculateAverageScore(track.communityScore) : null);
+
+  if (expertAvg !== null && communityAvg !== null) {
+    return Math.round((expertAvg * 0.6 + communityAvg * 0.4) * 100) / 100;
   }
-  return Math.round(bayesianCommunity * 100) / 100;
+  if (expertAvg !== null) {
+    return Math.round(expertAvg * 100) / 100;
+  }
+  if (communityAvg !== null) {
+    return Math.round(communityAvg * 100) / 100;
+  }
+  return 0;
+}
+
+/**
+ * ალაგებს ტრეკებს Top-24 ჩარტის წესით (metaScore / peopleScore / fairRating კლებადობით, შემდეგ ხმების რაოდენობით).
+ */
+export function sortTracksForTopChart(tracks: Track[]): Track[] {
+  return [...tracks].sort((a, b) => {
+    const scoreA = normalizeScoreToTen(
+      a.metaScore || a.peopleScore || calculateFairTrackRating(a) || 0
+    );
+    const scoreB = normalizeScoreToTen(
+      b.metaScore || b.peopleScore || calculateFairTrackRating(b) || 0
+    );
+    if (scoreB !== scoreA) return scoreB - scoreA;
+    const votesB = b.reviewsCount ?? b.communityVotesCount ?? 0;
+    const votesA = a.reviewsCount ?? a.communityVotesCount ?? 0;
+    return votesB - votesA;
+  });
 }
 
 /**
@@ -628,7 +747,7 @@ export function computeUpdatedCommunityScores(
   const nextVotesCount = prevCount + 1;
   const nextMeta =
     calculateMetaScore(track.expertScore, nextCommunityScore) ??
-    Math.round(nextCommunityTotal * 10);
+    nextCommunityTotal;
 
   return {
     communityScore: nextCommunityScore,
@@ -696,8 +815,7 @@ export function recalculateCommunityScoresFromReviews(
   const communityTotalScore = calculateAverageScore(communityScore);
   const communityVotesCount = remainingReviews.length;
   const metaScore =
-    calculateMetaScore(expertScore, communityScore) ??
-    Math.round(communityTotalScore * 10);
+    calculateMetaScore(expertScore, communityScore) ?? communityTotalScore;
 
   return {
     communityScore,

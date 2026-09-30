@@ -8,7 +8,6 @@ import {
   Music2,
   Sliders,
   Award,
-  Users,
   ExternalLink,
   ListMusic,
   Link2,
@@ -105,7 +104,6 @@ export default function StudioPage({
     lockInVerdict,
     addAndActivateTrack,
     launchTrackOnAir,
-    updateCommunityPrediction,
     toggleShowVideoInOverlay,
     togglePlayback,
     toggleMute,
@@ -1267,29 +1265,6 @@ export default function StudioPage({
                   </div>
                 );
               })}
-            </div>
-
-            {/* ხალხის პროგნოზის (communityScore) სწრაფი კალიბრაცია */}
-            <div className="mt-6 pt-5 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-2 text-xs text-zinc-400">
-                <Users className="w-4 h-4 text-zinc-400 shrink-0" />
-                <span>{i18n.ui.audienceSimulatorLabel}:</span>
-                <span className="font-mono-tabular font-semibold text-zinc-200">
-                  {communityAverage.toFixed(1)}
-                </span>
-              </div>
-              <input
-                type="range"
-                min={1.0}
-                max={10.0}
-                step={0.1}
-                value={communityAverage}
-                aria-label={i18n.ui.communityPrediction}
-                onChange={(e) =>
-                  void updateCommunityPrediction(parseFloat(e.target.value))
-                }
-                className="w-full sm:w-48 accent-zinc-400 cursor-pointer"
-              />
             </div>
 
             {/* შემაჯამებელი მეტრიკების ზოლი (საშუალო ქულა, ხალხის პროგნოზი, მეტა-ქულა) */}

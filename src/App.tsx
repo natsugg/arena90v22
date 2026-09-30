@@ -18,6 +18,7 @@ import ArtistProfilePage from './app/artist/[id]/page';
 import StudioPage from './app/studio/page';
 import OverlayPage from './app/overlay/page';
 import SubmitTrackModal from './components/SubmitTrackModal';
+import LiveTicker from './components/LiveTicker';
 import {
   clearLegacyDemoCache,
   useLiveSession,
@@ -395,6 +396,11 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {/* რეალური აქტივობის მორბენალი სტრიქონი ქუდის ქვეშ */}
+      <LiveTicker
+        onSelectTrack={(trackId) => navigate('track', { trackId })}
+      />
 
       {/* ტოსტ-შეტყობინება წვდომის შეზღუდვის შესახებ */}
       {accessDeniedToast && (
