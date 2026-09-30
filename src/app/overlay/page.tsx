@@ -27,9 +27,24 @@ export interface OverlayPageProps {
 
 export default function OverlayPage({ embedded = false }: OverlayPageProps) {
   const [session, setSession] = useState<LiveSession>(() => INITIAL_LIVE_SESSION);
+  const [sessionLoaded, setSessionLoaded] = useState<boolean>(false);
   const [fallbackTrack, setFallbackTrack] = useState<Track | null>(null);
   const [imgError, setImgError] = useState(false);
+  const [urlKey, setUrlKey] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return new URLSearchParams(window.location.search).get('key');
+  });
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const syncUrlKey = () => {
+      setUrlKey(new URLSearchParams(window.location.search).get('key'));
+    };
+    syncUrlKey();
+    window.addEventListener('popstate', syncUrlKey);
+    return () => window.removeEventListener('popstate', syncUrlKey);
+  }, []);
 
   // 1. სრულიად ავტონომიური, უპირობო პირდაპირი Firestore onSnapshot მოსმენა `live_sessions/current` დოკუმენტზე (ავტორიზაციის გარეშე, OBS CEF-ისთვის)
   useEffect(() => {
@@ -50,14 +65,17 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
             youtubeId:
               data.youtubeId ?? data.activeTrackSnapshot?.youtubeId ?? '',
             showVideoInOverlay: Boolean(data.showVideoInOverlay ?? true),
+            streamKey: typeof data.streamKey === 'string' ? data.streamKey : '',
             isPlaying: Boolean(data.isPlaying ?? true),
             isMuted: Boolean(data.isMuted ?? false),
             liveExpertDraft: data.liveExpertDraft ?? null,
           });
         }
+        setSessionLoaded(true);
       },
       (err) => {
         console.error('OBS Overlay session snapshot error:', err);
+        setSessionLoaded(true);
       }
     );
 
@@ -168,7 +186,22 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
 
   const activeTrackKey =
     snapshot?.id || session?.activeTrackId || fallbackTrack?.id || 'idle';
-  const shouldShowVideo = Boolean(showVideoInOverlay && youtubeId);
+  const currentUrlKey =
+    typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('key') ?? urlKey
+      : urlKey;
+  const sessionStreamKey = (session?.streamKey || '').trim();
+  const isStreamKeyAuthorized =
+    embedded ||
+    Boolean(
+      sessionLoaded &&
+        sessionStreamKey &&
+        currentUrlKey &&
+        currentUrlKey.trim() === sessionStreamKey
+    );
+  const shouldShowVideo = Boolean(
+    isStreamKeyAuthorized && showVideoInOverlay && youtubeId
+  );
   const isPlaying = Boolean(session?.isPlaying ?? true);
   const isMuted = Boolean(session?.isMuted ?? false);
 
@@ -248,6 +281,11 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
         : obsTheme === 'compact'
           ? 'max-w-[440px] bg-[#0B0F17]/95 border-zinc-800/90 shadow-2xl'
           : 'max-w-[540px] bg-[#0B0F17]/92 border-zinc-800/90 shadow-2xl';
+
+  // თუ ოვერლეი გახსნილია პირდაპირი ბმულით (!embedded) და key არ ემთხვევა session.streamKey-ს, არაფერი დავარენდეროთ
+  if (!isStreamKeyAuthorized) {
+    return <div className="min-h-screen w-full bg-transparent" />;
+  }
 
   if (!showOverlay && !embedded) {
     return <div className="min-h-screen w-full bg-transparent" />;

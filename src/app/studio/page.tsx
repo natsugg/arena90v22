@@ -18,6 +18,10 @@ import {
   Pause,
   Volume2,
   VolumeX,
+  Copy,
+  KeyRound,
+  RefreshCw,
+  Lock,
 } from 'lucide-react';
 import {
   collection,
@@ -49,6 +53,7 @@ import {
   type UserRole,
 } from '../../types';
 import {
+  auth,
   db,
   handleFirestoreError,
   OperationType,
@@ -74,12 +79,14 @@ export interface StudioPageProps {
   onSelectArtist?: (artistId: string) => void;
   onSelectTrack?: (trackId: string) => void;
   onOpenSubmitModal?: () => void;
+  onUnauthorizedRedirect?: () => void;
 }
 
 export default function StudioPage({
   onSelectArtist,
   onSelectTrack,
   onOpenSubmitModal,
+  onUnauthorizedRedirect,
 }: StudioPageProps = {}) {
   const {
     session,
@@ -88,9 +95,11 @@ export default function StudioPage({
     inQueueTracks,
     userProfile,
     currentUserProfile,
+    authLoading,
     isPlaying,
     isMuted,
     showVideoInOverlay,
+    streamKey,
     updateDraftScores,
     updateStreamStatus,
     lockInVerdict,
@@ -100,6 +109,7 @@ export default function StudioPage({
     toggleShowVideoInOverlay,
     togglePlayback,
     toggleMute,
+    regenerateStreamKey,
     updateObsSettings,
   } = useLiveSession('current');
 
@@ -127,6 +137,61 @@ export default function StudioPage({
 
   const activeUserProfile = currentUserProfile ?? userProfile;
   const isAdmin = activeUserProfile?.role === 'admin';
+  const canAccessStudio = Boolean(
+    auth.currentUser &&
+      (activeUserProfile?.role === 'admin' ||
+        activeUserProfile?.role === 'streamer')
+  );
+
+  const [copiedStreamUrl, setCopiedStreamUrl] = useState(false);
+  const [regeneratingKey, setRegeneratingKey] = useState(false);
+  const [keyRegeneratedNotice, setKeyRegeneratedNotice] = useState(false);
+
+  const activeStreamKey = session?.streamKey || streamKey || '';
+  const obsOverlayUrlWithKey =
+    typeof window !== 'undefined' && activeStreamKey
+      ? `${window.location.origin}/overlay?key=${activeStreamKey}`
+      : '';
+
+  const handleCopyObsStreamUrl = async () => {
+    if (!obsOverlayUrlWithKey) return;
+    try {
+      await navigator.clipboard.writeText(obsOverlayUrlWithKey);
+      setCopiedStreamUrl(true);
+      setTimeout(() => setCopiedStreamUrl(false), 2200);
+    } catch {
+      setCopiedStreamUrl(true);
+      setTimeout(() => setCopiedStreamUrl(false), 2200);
+    }
+  };
+
+  const handleRegenerateStreamKey = async () => {
+    setRegeneratingKey(true);
+    try {
+      await regenerateStreamKey();
+      setKeyRegeneratedNotice(true);
+      setTimeout(() => setKeyRegeneratedNotice(false), 2500);
+    } finally {
+      setRegeneratingKey(false);
+    }
+  };
+
+  // Route Guard: თუ მომხმარებელი არ არის ავტორიზებული ან არ აქვს 'admin' / 'streamer' როლი -> გადამისამართება მთავარ გვერდზე ('/')
+  useEffect(() => {
+    if (authLoading) return;
+    if (!canAccessStudio) {
+      if (onUnauthorizedRedirect) {
+        onUnauthorizedRedirect();
+      } else if (typeof window !== 'undefined') {
+        try {
+          window.history.replaceState({}, '', '/');
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        } catch {
+          // ignore history errors
+        }
+      }
+    }
+  }, [authLoading, canAccessStudio, onUnauthorizedRedirect]);
 
   // რიგის ჩანართი: 'in_queue' ("სტრიმის რიგი") vs 'all' ("სრული კატალოგი") vs 'users' ("მომხმარებლების მართვა")
   const [queueTab, setQueueTab] = useState<'in_queue' | 'all' | 'users'>('in_queue');
@@ -367,6 +432,33 @@ export default function StudioPage({
   const displayedQueueTracks =
     queueTab === 'in_queue' ? inQueueTracks : tracksQueue;
 
+  if (authLoading) {
+    return (
+      <div className="w-full max-w-[1360px] mx-auto px-6 py-24 flex flex-col items-center justify-center gap-4 text-center">
+        <Disc3 className="w-10 h-10 text-amber-400 animate-spin" />
+        <p className="text-sm font-medium text-zinc-300">
+          {i18n.ui.checkingAuth}
+        </p>
+      </div>
+    );
+  }
+
+  if (!canAccessStudio) {
+    return (
+      <div className="w-full max-w-[680px] mx-auto px-6 py-20">
+        <div
+          role="alert"
+          className="border border-rose-500/40 bg-rose-500/10 rounded-xl p-6 flex items-center gap-4 text-rose-200"
+        >
+          <Lock className="w-6 h-6 text-rose-400 shrink-0" />
+          <p className="text-sm font-semibold">
+            {i18n.ui.studioAccessRestricted}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full max-w-[1360px] mx-auto px-6 py-8">
       {/* ზედა სამუშაო ზოლი: აქტიური ტრეკის მიმოხილვა და ეთერის სტატუსის გადამრთველი */}
@@ -603,6 +695,60 @@ export default function StudioPage({
                 })}
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* OBS ოვერლეის დაცული ბმული (Stream Key) — კოპირება და გასაღების განახლება */}
+        <div className="mt-5 pt-4 border-t border-zinc-800/80 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs text-zinc-300 shrink-0">
+            <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="font-medium">{i18n.ui.obsStreamKeyLabel}:</span>
+            {keyRegeneratedNotice && (
+              <span className="text-emerald-400 font-semibold">
+                {i18n.ui.streamKeyRegenerated}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 flex-1 max-w-2xl">
+            <input
+              type="text"
+              readOnly
+              value={obsOverlayUrlWithKey}
+              aria-label={i18n.ui.obsStreamKeyLabel}
+              onClick={(e) => (e.target as HTMLInputElement).select()}
+              className="w-full min-w-0 px-3 py-1.5 text-xs font-mono-tabular bg-[#0B0F17] border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-amber-500"
+            />
+
+            <button
+              type="button"
+              onClick={() => void handleCopyObsStreamUrl()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-500 text-zinc-950 rounded-lg hover:bg-amber-400 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              {copiedStreamUrl ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{i18n.ui.copiedObsLink}</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{i18n.ui.copyObsLink}</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              disabled={regeneratingKey}
+              onClick={() => void handleRegenerateStreamKey()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[#0B0F17] text-zinc-300 border border-zinc-800 rounded-lg hover:border-zinc-700 hover:text-zinc-100 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${regeneratingKey ? 'animate-spin' : ''}`}
+              />
+              <span>{i18n.ui.regenerateStreamKey}</span>
+            </button>
           </div>
         </div>
 

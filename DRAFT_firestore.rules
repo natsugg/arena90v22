@@ -32,14 +32,22 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isVerified() && (
+      return isSignedIn() && (
+        (isVerified() && request.auth.token.email == 'hardsize@mail.ru') ||
+        (isVerified() && request.auth.uid == '71d9n4gGrTUsC1Cy9Dc4Sb1RiZD2') ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        request.auth.token.email == 'hardsize@mail.ru' ||
         (
+          isVerified() &&
           exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
         )
       );
+    }
+
+    function isStreamer() {
+      return isVerified() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'streamer';
     }
 
     function canPublishTrack() {
@@ -99,7 +107,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl',
-          'genre', 'duration', 'submittedBy', 'submittedByName',
+          'youtubeUrl', 'youtubeId', 'genre', 'duration', 'submittedBy', 'submittedByName',
           'isPriority', 'donationAmount', 'status',
           'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
           'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore', 'createdAt', 'updatedAt'
@@ -112,6 +120,8 @@ service cloud.firestore {
         && data.coverUrl is string && data.coverUrl.size() >= 0 && data.coverUrl.size() <= 500
         && data.audioUrl is string && data.audioUrl.size() >= 1 && data.audioUrl.size() <= 500
         && (!('sourceUrl' in data) || (data.sourceUrl is string && data.sourceUrl.size() >= 0 && data.sourceUrl.size() <= 500))
+        && (!('youtubeUrl' in data) || data.youtubeUrl == null || (data.youtubeUrl is string && data.youtubeUrl.size() >= 0 && data.youtubeUrl.size() <= 500))
+        && (!('youtubeId' in data) || data.youtubeId == null || (data.youtubeId is string && data.youtubeId.size() >= 0 && data.youtubeId.size() <= 64))
         && (!('genre' in data) || (data.genre is string && data.genre.size() >= 0 && data.genre.size() <= 60))
         && (!('duration' in data) || (data.duration is number && data.duration >= 0 && data.duration <= 7200))
         && isValidId(data.submittedBy)
@@ -169,6 +179,7 @@ service cloud.firestore {
         && snap.keys().hasAll(['id', 'title', 'artist', 'coverUrl'])
         && snap.keys().hasOnly([
           'id', 'title', 'artist', 'coverUrl', 'genre',
+          'youtubeUrl', 'youtubeId',
           'expertScore', 'expertTotalScore', 'communityTotalScore',
           'communityVotesCount', 'metaScore'
         ])
@@ -177,9 +188,11 @@ service cloud.firestore {
         && snap.artist is string && snap.artist.size() >= 1 && snap.artist.size() <= 120
         && snap.coverUrl is string && snap.coverUrl.size() >= 0 && snap.coverUrl.size() <= 500
         && (!('genre' in snap) || snap.genre == null || (snap.genre is string && snap.genre.size() >= 0 && snap.genre.size() <= 60))
+        && (!('youtubeUrl' in snap) || snap.youtubeUrl == null || (snap.youtubeUrl is string && snap.youtubeUrl.size() >= 0 && snap.youtubeUrl.size() <= 500))
+        && (!('youtubeId' in snap) || snap.youtubeId == null || (snap.youtubeId is string && snap.youtubeId.size() >= 0 && snap.youtubeId.size() <= 64))
         && (!('expertScore' in snap) || snap.expertScore == null || isValidCriteriaScores(snap.expertScore))
-        && (!('expertTotalScore' in snap) || snap.expertTotalScore == null || (snap.expertTotalScore is number && snap.expertTotalScore >= 1 && snap.expertTotalScore <= 10))
-        && (!('communityTotalScore' in snap) || snap.communityTotalScore == null || (snap.communityTotalScore is number && snap.communityTotalScore >= 1 && snap.communityTotalScore <= 10))
+        && (!('expertTotalScore' in snap) || snap.expertTotalScore == null || (snap.expertTotalScore is number && snap.expertTotalScore >= 0 && snap.expertTotalScore <= 10))
+        && (!('communityTotalScore' in snap) || snap.communityTotalScore == null || (snap.communityTotalScore is number && snap.communityTotalScore >= 0 && snap.communityTotalScore <= 10))
         && (!('communityVotesCount' in snap) || snap.communityVotesCount == null || (snap.communityVotesCount is number && snap.communityVotesCount >= 0 && snap.communityVotesCount <= 1000000))
         && (!('metaScore' in snap) || snap.metaScore == null || (snap.metaScore is number && snap.metaScore >= 0 && snap.metaScore <= 100));
     }
@@ -192,7 +205,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'isLive', 'streamStatus', 'activeTrackId', 'activeTrackSnapshot',
-          'hostId', 'title', 'votingOpen', 'isPlaying', 'playbackPosition',
+          'youtubeUrl', 'youtubeId', 'showVideoInOverlay', 'streamKey',
+          'hostId', 'title', 'votingOpen', 'isPlaying', 'isMuted', 'playbackPosition',
           'showObsOverlay', 'obsTheme', 'liveExpertDraft', 'viewersCount', 'updatedAt'
         ])
         && data.id == sessionId
@@ -201,10 +215,15 @@ service cloud.firestore {
         && data.streamStatus is string && data.streamStatus.size() <= 20 && data.streamStatus in ['idle', 'listening', 'locked', 'revealed', 'offline', 'starting', 'voting', 'results', 'paused']
         && (data.activeTrackId == null || (data.activeTrackId is string && data.activeTrackId.size() >= 0 && data.activeTrackId.size() <= 128))
         && (!('activeTrackSnapshot' in data) || data.activeTrackSnapshot == null || isValidActiveTrackSnapshot(data.activeTrackSnapshot))
+        && (!('youtubeUrl' in data) || data.youtubeUrl == null || (data.youtubeUrl is string && data.youtubeUrl.size() >= 0 && data.youtubeUrl.size() <= 500))
+        && (!('youtubeId' in data) || data.youtubeId == null || (data.youtubeId is string && data.youtubeId.size() >= 0 && data.youtubeId.size() <= 64))
+        && (!('showVideoInOverlay' in data) || data.showVideoInOverlay == null || data.showVideoInOverlay is bool)
+        && (!('streamKey' in data) || data.streamKey == null || (data.streamKey is string && data.streamKey.size() >= 0 && data.streamKey.size() <= 128))
         && isValidId(data.hostId)
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
         && data.votingOpen is bool
         && data.isPlaying is bool
+        && (!('isMuted' in data) || data.isMuted == null || data.isMuted is bool)
         && data.playbackPosition is number && data.playbackPosition >= 0 && data.playbackPosition <= 86400
         && data.showObsOverlay is bool
         && data.obsTheme is string && data.obsTheme.size() <= 20 && data.obsTheme in ['dark', 'neon', 'minimal', 'compact']
@@ -312,14 +331,14 @@ service cloud.firestore {
             && existing().status in ['pending', 'in_queue']
             && incoming().status in ['pending', 'in_queue', 'on_air']
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl', 'genre', 'status', 'updatedAt'
+              'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl', 'youtubeUrl', 'youtubeId', 'genre', 'status', 'updatedAt'
             ])
           ) ||
           // Action 2: Community rating or Studio verdict/status update
           (
             existing().status in ['in_queue', 'on_air', 'reviewed', 'community_catalog', 'queued', 'playing', 'reviewing']
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
+              'status', 'youtubeUrl', 'youtubeId', 'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
               'peopleScore', 'communityVotesCount', 'reviewsCount', 'metaScore', 'updatedAt'
             ])
           ) ||
@@ -379,25 +398,28 @@ service cloud.firestore {
       allow create: if isVerified()
         && isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (isAdmin() || isStreamer());
 
-      // 5. Session host / Studio control: allow updating activeTrackSnapshot, liveExpertDraft, and streamStatus
+      // 5. Session host / Studio control: ONLY admin or streamer can update live_sessions
       allow update: if isVerified()
         && isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
-        && incoming().id == existing().id
+        && (!('id' in existing()) || incoming().id == existing().id)
         && incoming().updatedAt == request.time
+        && (isAdmin() || isStreamer())
         && (
           incoming().diff(existing()).affectedKeys().hasOnly([
             'isLive', 'streamStatus', 'activeTrackId', 'activeTrackSnapshot',
-            'hostId', 'title', 'votingOpen', 'isPlaying', 'playbackPosition',
+            'youtubeUrl', 'youtubeId', 'showVideoInOverlay', 'streamKey',
+            'hostId', 'title', 'votingOpen', 'isPlaying', 'isMuted', 'playbackPosition',
             'showObsOverlay', 'obsTheme', 'liveExpertDraft',
             'viewersCount', 'updatedAt'
           ]) ||
           isAdmin()
         );
 
-      allow delete: if isValidId(sessionId) && isAdmin();
+      allow delete: if isValidId(sessionId) && (isAdmin() || isStreamer());
     }
 
     match /liveSessions/{sessionId} {
@@ -408,6 +430,7 @@ service cloud.firestore {
         && isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
         && incoming().updatedAt == request.time
+        && (isAdmin() || isStreamer())
         && (incoming().hostId == request.auth.uid || isAdmin())
         && (exists(/databases/$(database)/documents/users/$(incoming().hostId)) || isAdmin());
 
@@ -416,13 +439,15 @@ service cloud.firestore {
         && isValidLiveSession(incoming(), sessionId)
         && incoming().id == existing().id
         && incoming().updatedAt == request.time
+        && (isAdmin() || isStreamer())
         && (
           (
             request.auth.uid == existing().hostId
             && incoming().hostId == existing().hostId
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'isLive', 'streamStatus', 'activeTrackId', 'title',
-              'votingOpen', 'isPlaying', 'playbackPosition',
+              'isLive', 'streamStatus', 'activeTrackId', 'activeTrackSnapshot',
+              'youtubeUrl', 'youtubeId', 'showVideoInOverlay', 'streamKey',
+              'title', 'votingOpen', 'isPlaying', 'isMuted', 'playbackPosition',
               'showObsOverlay', 'obsTheme', 'liveExpertDraft',
               'viewersCount', 'updatedAt'
             ])
@@ -430,7 +455,7 @@ service cloud.firestore {
           isAdmin()
         );
 
-      allow delete: if isValidId(sessionId) && isAdmin();
+      allow delete: if isValidId(sessionId) && (isAdmin() || isStreamer());
     }
   }
 }

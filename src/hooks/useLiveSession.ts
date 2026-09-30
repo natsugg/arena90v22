@@ -91,6 +91,33 @@ export const INITIAL_CRITERIA_SCORES: CriteriaScores = {
   vibe: 8.0,
 };
 
+function isValidCriteriaScores(scores: unknown): scores is CriteriaScores {
+  if (!scores || typeof scores !== 'object') return false;
+  const s = scores as Record<string, unknown>;
+  const keys = ['lyrics', 'flow', 'production', 'identity', 'vibe'];
+  return keys.every(
+    (k) => typeof s[k] === 'number' && !Number.isNaN(s[k]) && s[k] >= 1 && s[k] <= 10
+  );
+}
+
+export function generateRandomStreamKey(): string {
+  const chars =
+    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const randomValues = new Uint32Array(24);
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(randomValues);
+    return (
+      'sk_' +
+      Array.from(randomValues, (v) => chars[v % chars.length]).join('')
+    );
+  }
+  let result = 'sk_';
+  for (let i = 0; i < 24; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
 export const INITIAL_LIVE_SESSION: LiveSession = {
   id: 'current',
   isLive: false,
@@ -100,6 +127,7 @@ export const INITIAL_LIVE_SESSION: LiveSession = {
   youtubeUrl: '',
   youtubeId: '',
   showVideoInOverlay: true,
+  streamKey: '',
   hostId: 'streamer_host',
   title: 'ქართული რელიზების ლაივ-განხილვა',
   votingOpen: false,
@@ -236,6 +264,7 @@ export interface UseLiveSessionResult {
   topCritics: TopCritic[];
   userProfile: User | null;
   currentUserProfile: User | null;
+  authLoading: boolean;
   loading: boolean;
   sessionLoading: boolean;
   trackLoading: boolean;
@@ -245,6 +274,7 @@ export interface UseLiveSessionResult {
   isPlaying: boolean;
   isMuted: boolean;
   showVideoInOverlay: boolean;
+  streamKey: string;
   isFirestoreSynced: boolean;
   updateDraftScores: (draft: CriteriaScores) => Promise<void>;
   updateStreamStatus: (status: LiveStreamStatus) => Promise<void>;
@@ -269,11 +299,13 @@ export interface UseLiveSessionResult {
   toggleShowVideoInOverlay: (nextValue?: boolean) => Promise<void>;
   togglePlayback: (nextPlaying?: boolean) => Promise<void>;
   toggleMute: (nextMuted?: boolean) => Promise<void>;
+  regenerateStreamKey: () => Promise<string>;
   updateObsSettings: (settings: {
     showObsOverlay?: boolean;
     showVideoInOverlay?: boolean;
     isPlaying?: boolean;
     isMuted?: boolean;
+    streamKey?: string;
     obsTheme?: 'dark' | 'neon' | 'minimal' | 'compact';
   }) => Promise<void>;
 }
@@ -343,6 +375,7 @@ export function useLiveSession(
     typeof options === 'string' ? false : (options.requireAuth ?? false);
 
   const [authReady, setAuthReady] = useState<boolean>(!requireAuth);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(
     () => Boolean(auth.currentUser)
   );
@@ -440,6 +473,7 @@ export function useLiveSession(
                 role: resolvedRole,
                 voteWeight: resolvedVoteWeight,
               });
+              setAuthLoading(false);
             } else {
               const fallbackRole: UserRole = isAdminEmail ? 'admin' : 'viewer';
               setCurrentUserProfile({
@@ -456,6 +490,7 @@ export function useLiveSession(
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
               });
+              setAuthLoading(false);
             }
           },
           () => {
@@ -474,10 +509,12 @@ export function useLiveSession(
               createdAt: Date.now(),
               updatedAt: Date.now(),
             });
+            setAuthLoading(false);
           }
         );
       } else {
         setCurrentUserProfile(null);
+        setAuthLoading(false);
       }
     });
 
@@ -578,6 +615,7 @@ export function useLiveSession(
             youtubeUrl: sessionYoutubeUrl,
             youtubeId: sessionYoutubeId,
             showVideoInOverlay: Boolean(data.showVideoInOverlay ?? true),
+            streamKey: typeof data.streamKey === 'string' ? data.streamKey : '',
             isPlaying: Boolean(data.isPlaying ?? true),
             isMuted: Boolean(data.isMuted ?? false),
             liveExpertDraft: data.liveExpertDraft ?? null,
@@ -1050,6 +1088,14 @@ export function useLiveSession(
   const syncSessionToFirestore = useCallback(
     async (nextSession: LiveSession) => {
       if (!auth.currentUser) return;
+      const activeRole = currentUserProfileRef.current?.role;
+      const isAdminOrStreamer =
+        auth.currentUser.email === 'hardsize@mail.ru' ||
+        auth.currentUser.uid === '71d9n4gGrTUsC1Cy9Dc4Sb1RiZD2' ||
+        activeRole === 'admin' ||
+        activeRole === 'streamer';
+      if (!isAdminOrStreamer) return;
+
       const sessionPath = `live_sessions/${sessionId}`;
       const candidateTrack =
         nextSession.activeTrackId === null
@@ -1059,10 +1105,59 @@ export function useLiveSession(
             : tracksQueueRef.current.find(
                 (t) => t.id === nextSession.activeTrackId
               ) ?? null;
-      const resolvedSnapshot =
+      const sanitizeSnapshot = (
+        snap: LiveSession['activeTrackSnapshot']
+      ): LiveSession['activeTrackSnapshot'] => {
+        if (!snap || !snap.id) return null;
+        const validExpertScore =
+          snap.expertScore && isValidCriteriaScores(snap.expertScore)
+            ? snap.expertScore
+            : null;
+        const validExpertTotal =
+          typeof snap.expertTotalScore === 'number' &&
+          snap.expertTotalScore >= 1 &&
+          snap.expertTotalScore <= 10
+            ? snap.expertTotalScore
+            : null;
+        const validCommunityTotal =
+          typeof snap.communityTotalScore === 'number' &&
+          snap.communityTotalScore >= 1 &&
+          snap.communityTotalScore <= 10
+            ? snap.communityTotalScore
+            : null;
+        const validMeta =
+          typeof snap.metaScore === 'number' &&
+          snap.metaScore >= 0 &&
+          snap.metaScore <= 100
+            ? snap.metaScore
+            : null;
+        return {
+          id: String(snap.id)
+            .replace(/[^a-zA-Z0-9_\-]/g, '_')
+            .slice(0, 128),
+          title: (snap.title || 'უსათაურო ტრეკი').slice(0, 120),
+          artist: (snap.artist || 'უცნობი არტისტი').slice(0, 120),
+          coverUrl: (snap.coverUrl || defaultCoverImg).slice(0, 500),
+          genre: (snap.genre || 'ქართული სცენა').slice(0, 60),
+          youtubeUrl: (snap.youtubeUrl || '').slice(0, 500),
+          youtubeId: (snap.youtubeId || '').slice(0, 64),
+          expertScore: validExpertScore,
+          expertTotalScore: validExpertTotal,
+          communityTotalScore: validCommunityTotal,
+          communityVotesCount:
+            typeof snap.communityVotesCount === 'number' &&
+            snap.communityVotesCount >= 0
+              ? snap.communityVotesCount
+              : 0,
+          metaScore: validMeta,
+        };
+      };
+
+      const rawSnapshot =
         nextSession.activeTrackId === null && !nextSession.activeTrackSnapshot
           ? null
           : buildTrackSnapshot(candidateTrack, nextSession.activeTrackSnapshot);
+      const resolvedSnapshot = sanitizeSnapshot(rawSnapshot);
       const sessionYoutubeUrl = (
         resolvedSnapshot?.youtubeUrl ??
         nextSession.youtubeUrl ??
@@ -1073,42 +1168,63 @@ export function useLiveSession(
         nextSession.youtubeId ??
         ''
       ).slice(0, 64);
+      const resolvedStreamKey = (
+        nextSession.streamKey ||
+        session?.streamKey ||
+        generateRandomStreamKey()
+      )
+        .trim()
+        .slice(0, 128);
       const safeHostId =
         (auth.currentUser?.uid || nextSession.hostId || 'streamer_host')
           .replace(/[^a-zA-Z0-9_\-]/g, '_')
           .slice(0, 128) || 'streamer_host';
+      const safeActiveTrackId =
+        nextSession.activeTrackId ?? resolvedSnapshot?.id ?? null;
 
       try {
-        await setDoc(
-          doc(db, 'live_sessions', sessionId),
-          {
-            id: sessionId,
-            isLive: Boolean(nextSession.isLive),
-            streamStatus: nextSession.streamStatus,
-            activeTrackId:
-              nextSession.activeTrackId ?? resolvedSnapshot?.id ?? null,
-            activeTrackSnapshot: resolvedSnapshot,
-            youtubeUrl: sessionYoutubeUrl,
-            youtubeId: sessionYoutubeId,
-            showVideoInOverlay: Boolean(
-              nextSession.showVideoInOverlay ?? true
-            ),
-            hostId: safeHostId,
-            title: (
-              nextSession.title || 'ქართული რელიზების ლაივ-განხილვა'
-            ).slice(0, 140),
-            votingOpen: Boolean(nextSession.votingOpen),
-            isPlaying: Boolean(nextSession.isPlaying ?? true),
-            isMuted: Boolean(nextSession.isMuted ?? false),
-            playbackPosition: nextSession.playbackPosition ?? 0,
-            showObsOverlay: Boolean(nextSession.showObsOverlay ?? true),
-            obsTheme: nextSession.obsTheme || 'dark',
-            liveExpertDraft: nextSession.liveExpertDraft ?? null,
-            viewersCount: nextSession.viewersCount ?? 1,
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
+        await setDoc(doc(db, 'live_sessions', sessionId), {
+          id: sessionId,
+          isLive: Boolean(nextSession.isLive),
+          streamStatus: nextSession.streamStatus || 'idle',
+          activeTrackId: safeActiveTrackId
+            ? String(safeActiveTrackId).slice(0, 128)
+            : null,
+          activeTrackSnapshot: resolvedSnapshot,
+          youtubeUrl: sessionYoutubeUrl,
+          youtubeId: sessionYoutubeId,
+          showVideoInOverlay: Boolean(nextSession.showVideoInOverlay ?? true),
+          streamKey: resolvedStreamKey,
+          hostId: safeHostId,
+          title: (
+            nextSession.title || 'ქართული რელიზების ლაივ-განხილვა'
+          ).slice(0, 140),
+          votingOpen: Boolean(nextSession.votingOpen),
+          isPlaying: Boolean(nextSession.isPlaying ?? true),
+          isMuted: Boolean(nextSession.isMuted ?? false),
+          playbackPosition:
+            typeof nextSession.playbackPosition === 'number' &&
+            nextSession.playbackPosition >= 0
+              ? Math.min(86400, nextSession.playbackPosition)
+              : 0,
+          showObsOverlay: Boolean(nextSession.showObsOverlay ?? true),
+          obsTheme:
+            nextSession.obsTheme &&
+            ['dark', 'neon', 'minimal', 'compact'].includes(nextSession.obsTheme)
+              ? nextSession.obsTheme
+              : 'dark',
+          liveExpertDraft:
+            nextSession.liveExpertDraft &&
+            isValidCriteriaScores(nextSession.liveExpertDraft)
+              ? nextSession.liveExpertDraft
+              : null,
+          viewersCount:
+            typeof nextSession.viewersCount === 'number' &&
+            nextSession.viewersCount >= 0
+              ? nextSession.viewersCount
+              : 1,
+          updatedAt: serverTimestamp(),
+        });
         setIsFirestoreSynced(true);
       } catch (err) {
         try {
@@ -1118,8 +1234,42 @@ export function useLiveSession(
         }
       }
     },
-    [sessionId, activeTrack, buildTrackSnapshot]
+    [sessionId, activeTrack, session?.streamKey, buildTrackSnapshot]
   );
+
+  // თუ სესიაში streamKey არ არსებობს, პირველივე გაშვებისას (სტრიმერის/ადმინის მიერ) ავტომატურად დავაგენერიროთ
+  const streamKeyInitRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (sessionLoading || authLoading || !isFirestoreSynced) return;
+    const role = currentUserProfile?.role;
+    const isAdminOrStreamer =
+      auth.currentUser?.email === 'hardsize@mail.ru' ||
+      role === 'admin' ||
+      role === 'streamer';
+    if (!isAdminOrStreamer) return;
+
+    if (!session?.streamKey || !session.streamKey.trim()) {
+      if (streamKeyInitRef.current) return;
+      streamKeyInitRef.current = true;
+      const generatedKey = generateRandomStreamKey();
+      const nextSession: LiveSession = {
+        ...(session ?? INITIAL_LIVE_SESSION),
+        streamKey: generatedKey,
+        updatedAt: Date.now(),
+      };
+      setSession(nextSession);
+      void syncSessionToFirestore(nextSession);
+    } else {
+      streamKeyInitRef.current = false;
+    }
+  }, [
+    sessionLoading,
+    authLoading,
+    isFirestoreSynced,
+    currentUserProfile?.role,
+    session,
+    syncSessionToFirestore,
+  ]);
 
   const syncTrackToFirestore = useCallback(
     async (track: Track, isCreate: boolean = false) => {
@@ -2194,6 +2344,7 @@ export function useLiveSession(
       showVideoInOverlay?: boolean;
       isPlaying?: boolean;
       isMuted?: boolean;
+      streamKey?: string;
       obsTheme?: 'dark' | 'neon' | 'minimal' | 'compact';
     }) => {
       const currentSession = session ?? INITIAL_LIVE_SESSION;
@@ -2213,6 +2364,10 @@ export function useLiveSession(
           settings.isPlaying ?? currentSession.isPlaying ?? true,
         isMuted:
           settings.isMuted ?? currentSession.isMuted ?? false,
+        streamKey:
+          settings.streamKey ??
+          currentSession.streamKey ??
+          generateRandomStreamKey(),
         obsTheme: settings.obsTheme ?? currentSession.obsTheme ?? 'dark',
         activeTrackSnapshot: snapshot,
         updatedAt: Date.now(),
@@ -2276,6 +2431,15 @@ export function useLiveSession(
     [session?.isMuted, updateObsSettings]
   );
 
+  /**
+   * სტრიმის გასაღების (streamKey) განახლება / რეგენერაცია გაჟონვის შემთხვევაში
+   */
+  const regenerateStreamKey = useCallback(async (): Promise<string> => {
+    const nextKey = generateRandomStreamKey();
+    await updateObsSettings({ streamKey: nextKey });
+    return nextKey;
+  }, [updateObsSettings]);
+
   // ტრეკები სტატუსით 'in_queue', დალაგებული დამატების დროის მიხედვით (ზრდადობით: პირველი დამატებული პირველია რიგში)
   const inQueueTracks = useMemo(() => {
     return tracksQueue
@@ -2326,6 +2490,7 @@ export function useLiveSession(
     topCritics,
     userProfile: currentUserProfile,
     currentUserProfile,
+    authLoading,
     loading: sessionLoading || tracksLoading || trackLoading,
     sessionLoading,
     trackLoading,
@@ -2335,6 +2500,7 @@ export function useLiveSession(
     isPlaying: Boolean(session?.isPlaying ?? true),
     isMuted: Boolean(session?.isMuted ?? false),
     showVideoInOverlay: Boolean(session?.showVideoInOverlay ?? true),
+    streamKey: session?.streamKey || '',
     isFirestoreSynced,
     updateDraftScores,
     updateStreamStatus,
@@ -2351,6 +2517,7 @@ export function useLiveSession(
     toggleShowVideoInOverlay,
     togglePlayback,
     toggleMute,
+    regenerateStreamKey,
     updateObsSettings,
   };
 }

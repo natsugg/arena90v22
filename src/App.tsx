@@ -10,7 +10,7 @@ import {
   onAuthStateChanged,
   type User as FirebaseUser,
 } from 'firebase/auth';
-import { Copy, Check, LogIn, LogOut, Plus, Lock } from 'lucide-react';
+import { Copy, Check, LogIn, LogOut, Plus, Lock, Disc3 } from 'lucide-react';
 import RootLayout from './app/layout';
 import HomePage from './app/page';
 import TrackDetailPage from './app/track/[id]/page';
@@ -117,15 +117,30 @@ function detectInitialRoute(): RouteState {
 }
 
 export default function App() {
-  const { currentUserProfile } = useLiveSession('current');
+  const {
+    session,
+    currentUserProfile,
+    authLoading: sessionAuthLoading,
+  } = useLiveSession('current');
   const canPublishTrack = canUserPublishTrack(currentUserProfile?.role);
   const [routeState, setRouteState] = useState<RouteState>(() =>
     detectInitialRoute()
   );
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [firebaseAuthChecked, setFirebaseAuthChecked] = useState(false);
   const [copiedObs, setCopiedObs] = useState(false);
+  const [accessDeniedToast, setAccessDeniedToast] = useState<string | null>(
+    null
+  );
   const [submitModalOpen, setSubmitModalOpen] = useState(false);
   const [submitModalArtist, setSubmitModalArtist] = useState<string>('');
+
+  const authLoading = !firebaseAuthChecked || sessionAuthLoading;
+  const canAccessStudio = Boolean(
+    currentUser &&
+      (currentUserProfile?.role === 'admin' ||
+        currentUserProfile?.role === 'streamer')
+  );
 
   useEffect(() => {
     clearLegacyDemoCache();
@@ -142,9 +157,36 @@ export default function App() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
+      setFirebaseAuthChecked(true);
     });
     return () => unsub();
   }, []);
+
+  // Route Guard /studio მარშრუტისთვის
+  useEffect(() => {
+    if (routeState.view !== 'studio') return;
+    if (authLoading) return;
+
+    if (
+      !currentUser ||
+      (currentUserProfile?.role !== 'admin' &&
+        currentUserProfile?.role !== 'streamer')
+    ) {
+      setRouteState((prev) => ({ ...prev, view: 'catalog' }));
+      try {
+        window.history.replaceState({}, '', '/');
+      } catch {
+        // ignore history errors
+      }
+      setAccessDeniedToast(i18n.ui.studioAccessRestricted);
+    }
+  }, [routeState.view, authLoading, currentUser, currentUserProfile?.role]);
+
+  useEffect(() => {
+    if (!accessDeniedToast) return;
+    const timer = setTimeout(() => setAccessDeniedToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [accessDeniedToast]);
 
   const navigate = (
     view: ActiveRoute,
@@ -158,9 +200,12 @@ export default function App() {
       artistId: nextArtistId,
     });
     try {
+      const streamKeyParam = session?.streamKey
+        ? `?key=${encodeURIComponent(session.streamKey)}`
+        : '';
       const nextUrl =
         view === 'overlay'
-          ? '/overlay'
+          ? `/overlay${streamKeyParam}`
           : view === 'studio'
             ? '/studio'
             : view === 'artist'
@@ -180,7 +225,8 @@ export default function App() {
   };
 
   const handleCopyObsLink = async () => {
-    const obsUrl = `${window.location.origin}/overlay`;
+    const keySuffix = session?.streamKey ? `?key=${session.streamKey}` : '';
+    const obsUrl = `${window.location.origin}/overlay${keySuffix}`;
     try {
       await navigator.clipboard.writeText(obsUrl);
       setCopiedObs(true);
@@ -212,22 +258,6 @@ export default function App() {
     return (
       <RootLayout transparent>
         <div className="relative min-h-screen bg-transparent">
-          <div className="fixed top-4 right-4 z-50 opacity-20 hover:opacity-100 transition-opacity flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => navigate('catalog')}
-              className="px-3 py-1.5 text-xs font-medium bg-zinc-900/90 text-zinc-200 border border-zinc-700 rounded-lg cursor-pointer whitespace-nowrap"
-            >
-              {i18n.nav.catalog}
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate('studio')}
-              className="px-3 py-1.5 text-xs font-medium bg-zinc-900/90 text-amber-300 border border-zinc-700 rounded-lg cursor-pointer whitespace-nowrap"
-            >
-              {i18n.nav.studio}
-            </button>
-          </div>
           <OverlayPage />
         </div>
       </RootLayout>
@@ -276,25 +306,31 @@ export default function App() {
             {i18n.nav.artists}
           </button>
 
-          <button
-            type="button"
-            onClick={() => navigate('studio')}
-            className={`transition-colors whitespace-nowrap cursor-pointer ${
-              routeState.view === 'studio'
-                ? 'text-amber-400 underline underline-offset-8'
-                : 'hover:text-zinc-100'
-            }`}
-          >
-            {i18n.nav.studio}
-          </button>
+          {(currentUserProfile?.role === 'admin' ||
+            currentUserProfile?.role === 'streamer') && (
+            <button
+              type="button"
+              onClick={() => navigate('studio')}
+              className={`transition-colors whitespace-nowrap cursor-pointer ${
+                routeState.view === 'studio'
+                  ? 'text-amber-400 underline underline-offset-8'
+                  : 'hover:text-zinc-100'
+              }`}
+            >
+              {i18n.nav.studio}
+            </button>
+          )}
 
-          <button
-            type="button"
-            onClick={() => navigate('overlay')}
-            className="hidden md:inline hover:text-zinc-100 transition-colors whitespace-nowrap cursor-pointer"
-          >
-            {i18n.nav.overlay}
-          </button>
+          {(currentUserProfile?.role === 'admin' ||
+            currentUserProfile?.role === 'streamer') && (
+            <button
+              type="button"
+              onClick={() => navigate('overlay')}
+              className="hidden md:inline hover:text-zinc-100 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              {i18n.nav.overlay}
+            </button>
+          )}
         </nav>
 
         {/* ზონა 3: ძირითადი მოქმედებები */}
@@ -318,23 +354,25 @@ export default function App() {
             </span>
           )}
 
-          <button
-            type="button"
-            onClick={() => void handleCopyObsLink()}
-            className="hidden xl:flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-200 bg-[#111723] border border-zinc-800 rounded-lg hover:border-zinc-700 transition-colors whitespace-nowrap cursor-pointer"
-          >
-            {copiedObs ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                <span>{i18n.nav.copiedObsUrl}</span>
-              </>
-            ) : (
-              <>
-                <Copy className="w-3.5 h-3.5 text-zinc-400" />
-                <span>{i18n.nav.copyObsUrl}</span>
-              </>
-            )}
-          </button>
+          {canAccessStudio && (
+            <button
+              type="button"
+              onClick={() => void handleCopyObsLink()}
+              className="hidden xl:flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-200 bg-[#111723] border border-zinc-800 rounded-lg hover:border-zinc-700 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              {copiedObs ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{i18n.nav.copiedObsUrl}</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>{i18n.nav.copyObsUrl}</span>
+                </>
+              )}
+            </button>
+          )}
 
           {currentUser ? (
             <button
@@ -358,13 +396,35 @@ export default function App() {
         </div>
       </header>
 
+      {/* ტოსტ-შეტყობინება წვდომის შეზღუდვის შესახებ */}
+      {accessDeniedToast && (
+        <div
+          role="alert"
+          className="max-w-[1360px] mx-auto px-6 pt-4"
+        >
+          <div className="border border-rose-500/40 bg-rose-500/10 rounded-xl px-4 py-3 flex items-center justify-between gap-3 text-xs sm:text-sm font-semibold text-rose-200">
+            <div className="flex items-center gap-2.5">
+              <Lock className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{accessDeniedToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAccessDeniedToast(null)}
+              className="text-xs text-rose-300 hover:text-white cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* მთავარი სამუშაო სივრცე */}
       <main className="pb-14">
         {routeState.view === 'catalog' && (
           <HomePage
             onSelectTrack={(id) => navigate('track', { trackId: id })}
             onSelectArtist={(id) => navigate('artist', { artistId: id })}
-            onOpenStudio={() => navigate('studio')}
+            onOpenStudio={canAccessStudio ? () => navigate('studio') : undefined}
             onOpenSubmitModal={() => handleOpenSubmitModal()}
           />
         )}
@@ -374,7 +434,7 @@ export default function App() {
             trackId={routeState.trackId}
             onBackToCatalog={() => navigate('catalog')}
             onSelectArtist={(id) => navigate('artist', { artistId: id })}
-            onOpenStudio={() => navigate('studio')}
+            onOpenStudio={canAccessStudio ? () => navigate('studio') : undefined}
           />
         )}
 
@@ -391,35 +451,53 @@ export default function App() {
         )}
 
         {routeState.view === 'studio' && (
-          <div className="space-y-6">
-            <StudioPage
-              onSelectArtist={(id) => navigate('artist', { artistId: id })}
-              onSelectTrack={(id) => navigate('track', { trackId: id })}
-              onOpenSubmitModal={() => handleOpenSubmitModal()}
-            />
-            <section className="max-w-[1360px] mx-auto px-6">
-              <div className="border border-zinc-800/90 rounded-2xl p-6 bg-[#070A0F]">
-                <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-4 border-b border-zinc-800/80">
-                  <div>
-                    <h2 className="text-base font-semibold text-zinc-100">
-                      {i18n.nav.overlay} — რეალურ დროში სინქრონიზაცია
-                    </h2>
-                    <p className="text-xs text-zinc-400 mt-0.5">
-                      {i18n.ui.obsTransparentHint}
-                    </p>
+          authLoading ? (
+            <div className="w-full max-w-[1360px] mx-auto px-6 py-24 flex flex-col items-center justify-center gap-4 text-center">
+              <Disc3 className="w-10 h-10 text-amber-400 animate-spin" />
+              <p className="text-sm font-medium text-zinc-300">
+                {i18n.ui.checkingAuth}
+              </p>
+            </div>
+          ) : canAccessStudio ? (
+            <div className="space-y-6">
+              <StudioPage
+                onSelectArtist={(id) => navigate('artist', { artistId: id })}
+                onSelectTrack={(id) => navigate('track', { trackId: id })}
+                onOpenSubmitModal={() => handleOpenSubmitModal()}
+                onUnauthorizedRedirect={() => {
+                  setRouteState((prev) => ({ ...prev, view: 'catalog' }));
+                  try {
+                    window.history.replaceState({}, '', '/');
+                  } catch {
+                    // ignore
+                  }
+                  setAccessDeniedToast(i18n.ui.studioAccessRestricted);
+                }}
+              />
+              <section className="max-w-[1360px] mx-auto px-6">
+                <div className="border border-zinc-800/90 rounded-2xl p-6 bg-[#070A0F]">
+                  <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-4 border-b border-zinc-800/80">
+                    <div>
+                      <h2 className="text-base font-semibold text-zinc-100">
+                        {i18n.nav.overlay} — რეალურ დროში სინქრონიზაცია
+                      </h2>
+                      <p className="text-xs text-zinc-400 mt-0.5">
+                        {i18n.ui.obsTransparentHint}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => navigate('overlay')}
+                      className="px-3.5 py-2 text-xs font-medium text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg hover:bg-amber-500/20 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {i18n.nav.overlay} (სრული ეკრანი)
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => navigate('overlay')}
-                    className="px-3.5 py-2 text-xs font-medium text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg hover:bg-amber-500/20 transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    {i18n.nav.overlay} (სრული ეკრანი)
-                  </button>
+                  <OverlayPage embedded />
                 </div>
-                <OverlayPage embedded />
-              </div>
-            </section>
-          </div>
+              </section>
+            </div>
+          ) : null
         )}
       </main>
 

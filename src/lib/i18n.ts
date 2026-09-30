@@ -26,12 +26,15 @@ export const i18n = {
     areYouSure: 'დარწმუნებული ხართ?',
     accessRestricted: 'წვდომა შეზღუდულია',
     expertsOnly: 'მხოლოდ ექსპერტებისთვის',
+    studioAccessRestricted:
+      'წვდომა შეზღუდულია. საჭიროა სტრიმერის ან ადმინისტრატორის უფლებები',
   },
 
   nav: {
     catalog: 'კატალოგი და ტოპ 24',
     artists: 'არტისტის პროფილი',
-    studio: 'სტრიმერის პანელი',
+    studio: 'სტუდია',
+    studioPanel: 'სტრიმერის პანელი',
     overlay: 'OBS ოვერლეი',
     submitTrack: 'ტრეკის წარდგენა',
     copyObsUrl: 'OBS ბმულის კოპირება',
@@ -330,6 +333,14 @@ export const i18n = {
     areYouSure: 'დარწმუნებული ხართ?',
     accessRestricted: 'წვდომა შეზღუდულია',
     expertsOnly: 'მხოლოდ ექსპერტებისთვის',
+    studioAccessRestricted:
+      'წვდომა შეზღუდულია. საჭიროა სტრიმერის ან ადმინისტრატორის უფლებები',
+    checkingAuth: 'ავტორიზაციისა და უფლებების შემოწმება...',
+    obsStreamKeyLabel: 'OBS ოვერლეის დაცული ბმული (Stream Key)',
+    copyObsLink: 'ბმულის კოპირება',
+    copiedObsLink: 'ბმული დაკოპირდა',
+    regenerateStreamKey: 'გასაღების განახლება',
+    streamKeyRegenerated: 'სტრიმის გასაღები განახლდა',
   },
 } as const;
 

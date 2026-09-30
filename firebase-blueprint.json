@@ -289,6 +289,12 @@
           "type": "boolean",
           "description": "Whether the YouTube video player should be rendered in the OBS overlay."
         },
+        "streamKey": {
+          "type": "string",
+          "description": "Secret stream key required as a URL query parameter (?key=...) to view the OBS overlay.",
+          "minLength": 0,
+          "maxLength": 128
+        },
         "hostId": {
           "type": "string",
           "description": "UID of the streamer/host controlling the session.",

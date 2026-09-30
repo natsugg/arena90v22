@@ -302,6 +302,7 @@ export interface LiveSession {
   youtubeUrl?: string;
   youtubeId?: string;
   showVideoInOverlay?: boolean;
+  streamKey?: string;
   hostId: string;
   title: string;
   votingOpen: boolean;
