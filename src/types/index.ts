@@ -25,9 +25,20 @@ export const DEFAULT_ROLE_VOTE_WEIGHTS: Record<UserRole, number> = {
   vip: 2.0,
   moderator: 2.5,
   expert: 5.0,
-  streamer: 10.0,
-  admin: 10.0,
+  streamer: 5.0,
+  admin: 5.0,
 };
+
+export const TRACK_PUBLISHER_ROLES: UserRole[] = [
+  'admin',
+  'streamer',
+  'expert',
+  'moderator',
+];
+
+export function canUserPublishTrack(role?: UserRole | null): boolean {
+  return Boolean(role && TRACK_PUBLISHER_ROLES.includes(role));
+}
 
 /**
  * მომხმარებლის პროფილი (`/users/{userId}`).
@@ -327,14 +338,7 @@ export function isValidCriteriaScores(
  */
 export function getArtistIdFromName(artistName: string): string {
   const normalized = artistName.trim().toLowerCase();
-  if (normalized.includes('kordz')) return 'artist_kordz_moku';
-  if (normalized.includes('nikakoi')) return 'artist_nikakoi_tba';
-  if (normalized.includes('tamada')) return 'artist_tamada_jazz';
-  if (normalized.includes('eko') || normalized.includes('vinda'))
-    return 'artist_eko_vinda';
-  if (normalized.includes('kay g') || normalized.includes('luna'))
-    return 'artist_kayg_luna';
-  if (normalized.includes('jeronimo')) return 'artist_jeronimo_ice';
+  if (!normalized) return 'artist_unknown';
 
   const ascii = normalized
     .replace(/[^a-z0-9]+/g, '_')
@@ -615,5 +619,66 @@ export function computeUpdatedCommunityScores(
     communityTotalScore: nextCommunityTotal,
     communityVotesCount: nextVotesCount,
     metaScore: nextMeta,
+  };
+}
+
+/**
+ * რეცენზიის წაშლის შემდეგ ხელახლა ითვლის ტრეკის შეწონილ communityScore-ს დარჩენილი რეცენზიებიდან.
+ */
+export function recalculateCommunityScoresFromReviews(
+  remainingReviews: TrackReview[],
+  expertScore: CriteriaScores | null
+): {
+  communityScore: CriteriaScores | null;
+  communityTotalScore: number | null;
+  communityVotesCount: number;
+  metaScore: number | null;
+} {
+  if (remainingReviews.length === 0) {
+    return {
+      communityScore: null,
+      communityTotalScore: null,
+      communityVotesCount: 0,
+      metaScore: calculateMetaScore(expertScore, null),
+    };
+  }
+
+  let totalWeight = 0;
+  let sumLyrics = 0;
+  let sumFlow = 0;
+  let sumProduction = 0;
+  let sumIdentity = 0;
+  let sumVibe = 0;
+
+  for (const rev of remainingReviews) {
+    const w = Math.max(0.1, Math.min(10, rev.voteWeight || 1.0));
+    totalWeight += w;
+    sumLyrics += rev.scores.lyrics * w;
+    sumFlow += rev.scores.flow * w;
+    sumProduction += rev.scores.production * w;
+    sumIdentity += rev.scores.identity * w;
+    sumVibe += rev.scores.vibe * w;
+  }
+
+  const safeWeight = totalWeight > 0 ? totalWeight : 1;
+  const communityScore: CriteriaScores = {
+    lyrics: Math.round((sumLyrics / safeWeight) * 10) / 10,
+    flow: Math.round((sumFlow / safeWeight) * 10) / 10,
+    production: Math.round((sumProduction / safeWeight) * 10) / 10,
+    identity: Math.round((sumIdentity / safeWeight) * 10) / 10,
+    vibe: Math.round((sumVibe / safeWeight) * 10) / 10,
+  };
+
+  const communityTotalScore = calculateAverageScore(communityScore);
+  const communityVotesCount = remainingReviews.length;
+  const metaScore =
+    calculateMetaScore(expertScore, communityScore) ??
+    Math.round(communityTotalScore * 10);
+
+  return {
+    communityScore,
+    communityTotalScore,
+    communityVotesCount,
+    metaScore,
   };
 }

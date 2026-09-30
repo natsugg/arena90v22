@@ -12,7 +12,19 @@ import {
   ExternalLink,
   ListMusic,
   Link2,
+  Shield,
+  Trash2,
 } from 'lucide-react';
+import {
+  collection,
+  doc,
+  query,
+  orderBy,
+  limit,
+  onSnapshot,
+  updateDoc,
+  deleteDoc,
+} from 'firebase/firestore';
 import { i18n } from '../../lib/i18n';
 import { fetchYouTubeMetadata, extractYouTubeId } from '../../lib/youtube';
 import {
@@ -22,13 +34,30 @@ import {
 } from '../../hooks/useLiveSession';
 import {
   CRITERIA_KEYS,
+  DEFAULT_ROLE_VOTE_WEIGHTS,
   calculateAverageScore,
   calculateMetaScore,
   getArtistIdFromName,
   type CriteriaKey,
   type CriteriaScores,
   type LiveStreamStatus,
+  type User,
+  type UserRole,
 } from '../../types';
+import {
+  db,
+  handleFirestoreError,
+  OperationType,
+} from '../../lib/firebase';
+
+const ADMIN_ROLE_OPTIONS: { role: UserRole; label: string; voteWeight: number }[] = [
+  { role: 'viewer', label: i18n.roleOptions.viewer, voteWeight: DEFAULT_ROLE_VOTE_WEIGHTS.viewer },
+  { role: 'vip', label: i18n.roleOptions.vip, voteWeight: DEFAULT_ROLE_VOTE_WEIGHTS.vip },
+  { role: 'moderator', label: i18n.roleOptions.moderator, voteWeight: DEFAULT_ROLE_VOTE_WEIGHTS.moderator },
+  { role: 'expert', label: i18n.roleOptions.expert, voteWeight: DEFAULT_ROLE_VOTE_WEIGHTS.expert },
+  { role: 'streamer', label: i18n.roleOptions.streamer, voteWeight: DEFAULT_ROLE_VOTE_WEIGHTS.streamer },
+  { role: 'admin', label: i18n.roleOptions.admin, voteWeight: DEFAULT_ROLE_VOTE_WEIGHTS.admin },
+];
 
 const STREAM_STATUS_OPTIONS: LiveStreamStatus[] = [
   'idle',
@@ -53,16 +82,129 @@ export default function StudioPage({
     activeTrack,
     tracksQueue,
     inQueueTracks,
+    userProfile,
+    currentUserProfile,
     updateDraftScores,
     updateStreamStatus,
     lockInVerdict,
     addAndActivateTrack,
     launchTrackOnAir,
     updateCommunityPrediction,
+    updateObsSettings,
   } = useLiveSession('current');
 
-  // რიგის ჩანართი: 'in_queue' ("სტრიმის რიგი") vs 'all' ("სრული კატალოგი")
-  const [queueTab, setQueueTab] = useState<'in_queue' | 'all'>('in_queue');
+  const activeUserProfile = currentUserProfile ?? userProfile;
+  const isAdmin = activeUserProfile?.role === 'admin';
+
+  // რიგის ჩანართი: 'in_queue' ("სტრიმის რიგი") vs 'all' ("სრული კატალოგი") vs 'users' ("მომხმარებლების მართვა")
+  const [queueTab, setQueueTab] = useState<'in_queue' | 'all' | 'users'>('in_queue');
+
+  // მომხმარებლების მართვა (მხოლოდ role === 'admin'-ისთვის)
+  const [managedUsers, setManagedUsers] = useState<User[]>([]);
+  const [updatingUserUid, setUpdatingUserUid] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setManagedUsers([]);
+      return;
+    }
+
+    const usersQuery = query(
+      collection(db, 'users'),
+      orderBy('createdAt', 'desc'),
+      limit(30)
+    );
+
+    const unsubscribeUsers = onSnapshot(
+      usersQuery,
+      (snapshot) => {
+        const list: User[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as Partial<User>;
+          const role: UserRole = data.role || 'viewer';
+          return {
+            uid: docSnap.id,
+            displayName: data.displayName || 'მსმენელი',
+            avatarUrl: data.avatarUrl,
+            role,
+            xp: typeof data.xp === 'number' ? data.xp : 0,
+            level: typeof data.level === 'number' ? data.level : 1,
+            voteWeight:
+              typeof data.voteWeight === 'number'
+                ? data.voteWeight
+                : DEFAULT_ROLE_VOTE_WEIGHTS[role] ?? 1.0,
+            reviewsCount:
+              typeof data.reviewsCount === 'number' ? data.reviewsCount : 0,
+            helpfulVotesReceived:
+              typeof data.helpfulVotesReceived === 'number'
+                ? data.helpfulVotesReceived
+                : 0,
+            createdAt: data.createdAt ?? Date.now(),
+            updatedAt: data.updatedAt ?? Date.now(),
+          };
+        });
+        setManagedUsers(list);
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'users');
+        } catch {
+          // logged by handleFirestoreError
+        }
+      }
+    );
+
+    return () => unsubscribeUsers();
+  }, [isAdmin]);
+
+  const handleUserRoleChange = async (targetUser: User, nextRole: UserRole) => {
+    if (!isAdmin) return;
+    const voteWeight = DEFAULT_ROLE_VOTE_WEIGHTS[nextRole] ?? 1.0;
+    setUpdatingUserUid(targetUser.uid);
+    try {
+      await updateDoc(doc(db, 'users', targetUser.uid), {
+        role: nextRole,
+        voteWeight,
+      });
+    } catch (err) {
+      try {
+        handleFirestoreError(
+          err,
+          OperationType.UPDATE,
+          `users/${targetUser.uid}`
+        );
+      } catch {
+        // logged by handleFirestoreError
+      }
+    } finally {
+      setUpdatingUserUid(null);
+    }
+  };
+
+  const handleDeleteUser = async (targetUser: User) => {
+    if (!isAdmin) return;
+    const confirmed =
+      typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm(i18n.phrases.areYouSure)
+        : true;
+    if (!confirmed) return;
+
+    setUpdatingUserUid(targetUser.uid);
+    try {
+      await deleteDoc(doc(db, 'users', targetUser.uid));
+    } catch (err) {
+      try {
+        handleFirestoreError(
+          err,
+          OperationType.DELETE,
+          `users/${targetUser.uid}`
+        );
+      } catch {
+        // logged by handleFirestoreError
+      }
+    } finally {
+      setUpdatingUserUid(null);
+    }
+  };
 
   // ფორმის მდგომარეობა ახალი ტრეკის დასამატებლად
   const [youtubeUrlInput, setYoutubeUrlInput] = useState('');
@@ -264,6 +406,20 @@ export default function StudioPage({
                         <span>{activeTrack.genre}</span>
                       </>
                     )}
+                    {(activeTrack.sourceUrl || activeTrack.audioUrl) && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <a
+                          href={activeTrack.sourceUrl || activeTrack.audioUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-amber-400 hover:underline font-medium"
+                        >
+                          <span>{i18n.portal.openOriginalSource}</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </>
+                    )}
                   </div>
                 </>
               ) : (
@@ -274,34 +430,102 @@ export default function StudioPage({
             </div>
           </div>
 
-          {/* მარჯვენა მხარე: ეთერის სტატუსის სეგმენტირებული მართვა */}
-          <div className="flex flex-col items-start lg:items-end gap-2 shrink-0">
-            <span className="text-xs text-zinc-400">
-              {i18n.ui.streamStatusControl}
-            </span>
-            <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-[#0B0F17] border border-zinc-800 rounded-lg">
-              {STREAM_STATUS_OPTIONS.map((statusKey) => {
-                const active = currentStatus === statusKey;
-                return (
-                  <button
-                    key={statusKey}
-                    type="button"
-                    onClick={() => void updateStreamStatus(statusKey)}
-                    className={`px-3 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-                      active
-                        ? statusKey === 'revealed'
-                          ? 'bg-amber-500 text-zinc-950 font-semibold'
-                          : 'bg-zinc-800 text-zinc-100'
-                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
-                    }`}
-                  >
-                    {i18n.statuses[statusKey]}
-                  </button>
-                );
-              })}
+          {/* მარჯვენა მხარე: ეთერის სტატუსის სეგმენტირებული მართვა და OBS პარამეტრები */}
+          <div className="flex flex-col items-start lg:items-end gap-3 shrink-0">
+            <div className="flex flex-col items-start lg:items-end gap-1.5">
+              <span className="text-xs text-zinc-400">
+                {i18n.ui.streamStatusControl}
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-[#0B0F17] border border-zinc-800 rounded-lg">
+                {STREAM_STATUS_OPTIONS.map((statusKey) => {
+                  const active = currentStatus === statusKey;
+                  return (
+                    <button
+                      key={statusKey}
+                      type="button"
+                      onClick={() => void updateStreamStatus(statusKey)}
+                      className={`px-3 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                        active
+                          ? statusKey === 'revealed'
+                            ? 'bg-amber-500 text-zinc-950 font-semibold'
+                            : 'bg-zinc-800 text-zinc-100'
+                          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+                      }`}
+                    >
+                      {i18n.statuses[statusKey]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* OBS ხილვადობა და თემის გადამრთველი */}
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() =>
+                  void updateObsSettings({
+                    showObsOverlay: !(session?.showObsOverlay ?? true),
+                  })
+                }
+                className={`px-2.5 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer ${
+                  (session?.showObsOverlay ?? true)
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                    : 'border-zinc-800 bg-[#0B0F17] text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {i18n.ui.obsOverlayVisibility}:{' '}
+                {(session?.showObsOverlay ?? true) ? 'ჩართულია' : 'დამალულია'}
+              </button>
+
+              <div className="flex items-center gap-1 p-1 bg-[#0B0F17] border border-zinc-800 rounded-lg">
+                {(
+                  ['dark', 'neon', 'minimal', 'compact'] as const
+                ).map((themeKey) => {
+                  const activeTheme = (session?.obsTheme ?? 'dark') === themeKey;
+                  return (
+                    <button
+                      key={themeKey}
+                      type="button"
+                      onClick={() =>
+                        void updateObsSettings({ obsTheme: themeKey })
+                      }
+                      className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                        activeTheme
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {i18n.ui.obsThemes[themeKey]}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
+
+        {/* ჩაშენებული YouTube პლეერი აქტიური ტრეკისთვის სტუდიაში */}
+        {activeTrack &&
+          (() => {
+            const ytId = extractYouTubeId(
+              activeTrack.sourceUrl || activeTrack.audioUrl || ''
+            );
+            if (!ytId) return null;
+            return (
+              <div className="mt-5 pt-5 border-t border-zinc-800/80">
+                <div className="relative w-full overflow-hidden rounded-xl border border-zinc-800 bg-black aspect-video max-h-[300px]">
+                  <iframe
+                    src={`https://www.youtube.com/embed/${ytId}?rel=0`}
+                    title={activeTrack.title}
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                    className="w-full h-full border-0"
+                  />
+                </div>
+              </div>
+            );
+          })()}
       </section>
 
       {/* მთავარი სამუშაო ბადე: მარცხნივ სტრიმის რიგი + ტრეკის დამატება, მარჯვნივ 5 სლაიდერის პულტი */}
@@ -321,7 +545,7 @@ export default function StudioPage({
                 </span>
               </div>
 
-              <div className="flex items-center gap-1 p-1 bg-[#0B0F17] border border-zinc-800 rounded-lg">
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-[#0B0F17] border border-zinc-800 rounded-lg">
                 <button
                   type="button"
                   onClick={() => setQueueTab('in_queue')}
@@ -344,14 +568,90 @@ export default function StudioPage({
                 >
                   {i18n.studioQueue.tabAllCatalog} ({tracksQueue.length})
                 </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setQueueTab('users')}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                      queueTab === 'users'
+                        ? 'bg-amber-500 text-zinc-950 font-semibold'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {i18n.phrases.userManagement} ({managedUsers.length})
+                  </button>
+                )}
               </div>
             </div>
 
             <p className="text-xs text-zinc-400">
-              {i18n.studioQueue.queueSubtitle}
+              {queueTab === 'users'
+                ? i18n.admin.userManagementSubtitle
+                : i18n.studioQueue.queueSubtitle}
             </p>
 
-            {displayedQueueTracks.length === 0 ? (
+            {queueTab === 'users' && isAdmin ? (
+              managedUsers.length === 0 ? (
+                <div className="py-8 px-4 text-center border border-dashed border-zinc-800 rounded-xl">
+                  <p className="text-xs text-zinc-400">
+                    {i18n.admin.emptyUsers}
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-zinc-800/70">
+                  {managedUsers.map((u) => (
+                    <div
+                      key={u.uid}
+                      className="py-3 first:pt-0 last:pb-0 flex flex-wrap items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-9 h-9 rounded-full overflow-hidden bg-zinc-900 border border-zinc-800 shrink-0 flex items-center justify-center text-xs font-bold text-amber-400">
+                          {u.avatarUrl ? (
+                            <img
+                              src={u.avatarUrl}
+                              alt={u.displayName}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <span>
+                              {(u.displayName || 'U').slice(0, 1).toUpperCase()}
+                            </span>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-zinc-100 truncate">
+                            {u.displayName}
+                          </p>
+                          <p className="text-xs text-zinc-400 font-mono-tabular">
+                            ×{u.voteWeight.toFixed(1)} · {u.xp} XP
+                          </p>
+                        </div>
+                      </div>
+
+                      <select
+                        aria-label={`${i18n.admin.colActions}: ${u.displayName}`}
+                        value={u.role}
+                        disabled={updatingUserUid === u.uid}
+                        onChange={(e) =>
+                          void handleUserRoleChange(
+                            u,
+                            e.target.value as UserRole
+                          )
+                        }
+                        className="px-2.5 py-1.5 text-xs font-medium bg-[#0B0F17] border border-zinc-800 rounded-lg text-zinc-100 focus:outline-none focus:border-amber-500 cursor-pointer"
+                      >
+                        {ADMIN_ROLE_OPTIONS.map((opt) => (
+                          <option key={opt.role} value={opt.role}>
+                            {opt.label} (×{opt.voteWeight.toFixed(1)})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : displayedQueueTracks.length === 0 ? (
               <div className="py-8 px-4 text-center border border-dashed border-zinc-800 rounded-xl space-y-3">
                 <p className="text-xs text-zinc-400">
                   {i18n.studioQueue.emptyQueue}
@@ -386,6 +686,10 @@ export default function StudioPage({
                           src={track.coverUrl || PRESET_COVERS.vinyl}
                           alt={track.title}
                           referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            e.currentTarget.onerror = null;
+                            e.currentTarget.src = PRESET_COVERS.vinyl;
+                          }}
                           className="w-11 h-11 rounded-md object-cover bg-zinc-900 border border-zinc-800 shrink-0"
                         />
                         <div className="min-w-0 space-y-0.5">
@@ -786,6 +1090,137 @@ export default function StudioPage({
           </section>
         </div>
       </div>
+
+      {/* ადმინისტრატორის სრული პანელი: "მომხმარებლების მართვა" (მხოლოდ role === 'admin'-ისთვის) */}
+      {isAdmin && (
+        <section className="mt-8 border border-zinc-800/90 bg-[#111723] rounded-xl p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-amber-400" />
+                <h2 className="text-lg font-semibold text-zinc-100">
+                  {i18n.phrases.userManagement}
+                </h2>
+                <span className="text-xs font-mono-tabular font-bold text-amber-400">
+                  ({managedUsers.length})
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400">
+                {i18n.admin.userManagementSubtitle}
+              </p>
+            </div>
+          </div>
+
+          {managedUsers.length === 0 ? (
+            <div className="py-8 text-center text-xs text-zinc-400">
+              {i18n.admin.emptyUsers}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-800 text-zinc-400">
+                    <th className="py-3 pr-4 font-semibold">
+                      {i18n.admin.colUser}
+                    </th>
+                    <th className="py-3 px-4 font-semibold">
+                      {i18n.admin.colRole}
+                    </th>
+                    <th className="py-3 px-4 font-semibold">
+                      {i18n.admin.colVoteWeight}
+                    </th>
+                    <th className="py-3 px-4 font-semibold">
+                      {i18n.admin.colXp}
+                    </th>
+                    <th className="py-3 pl-4 font-semibold text-right">
+                      {i18n.admin.colActions}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/70">
+                  {managedUsers.map((u) => (
+                    <tr key={u.uid} className="hover:bg-zinc-900/40">
+                      <td className="py-3.5 pr-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-full overflow-hidden bg-zinc-900 border border-zinc-800 shrink-0 flex items-center justify-center text-xs font-bold text-amber-400">
+                            {u.avatarUrl ? (
+                              <img
+                                src={u.avatarUrl}
+                                alt={u.displayName}
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <span>
+                                {(u.displayName || 'U')
+                                  .slice(0, 1)
+                                  .toUpperCase()}
+                              </span>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-zinc-100 truncate">
+                              {u.displayName}
+                            </p>
+                            <p className="text-[11px] font-mono-tabular text-zinc-500 truncate">
+                              {u.uid}
+                            </p>
+                          </div>
+                        </div>
+                      </td>
+
+                      <td className="py-3.5 px-4 text-zinc-200 font-medium">
+                        {i18n.roles[u.role]}
+                      </td>
+
+                      <td className="py-3.5 px-4 font-mono-tabular font-bold text-amber-400">
+                        ×{u.voteWeight.toFixed(1)}
+                      </td>
+
+                      <td className="py-3.5 px-4 font-mono-tabular text-zinc-300">
+                        {u.xp} XP
+                      </td>
+
+                      <td className="py-3.5 pl-4 text-right">
+                        <div className="inline-flex items-center justify-end gap-2">
+                          <select
+                            aria-label={`${i18n.admin.colActions}: ${u.displayName}`}
+                            value={u.role}
+                            disabled={updatingUserUid === u.uid}
+                            onChange={(e) =>
+                              void handleUserRoleChange(
+                                u,
+                                e.target.value as UserRole
+                              )
+                            }
+                            className="px-3 py-1.5 text-xs font-medium bg-[#0B0F17] border border-zinc-800 rounded-lg text-zinc-100 focus:outline-none focus:border-amber-500 cursor-pointer"
+                          >
+                            {ADMIN_ROLE_OPTIONS.map((opt) => (
+                              <option key={opt.role} value={opt.role}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            disabled={updatingUserUid === u.uid}
+                            title={i18n.phrases.deleteShort}
+                            onClick={() => void handleDeleteUser(u)}
+                            className="p-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

@@ -9,9 +9,21 @@ import {
   Award,
   Users,
   Radio,
+  ExternalLink,
+  Play,
+  Trash2,
 } from 'lucide-react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  deleteDoc,
+  updateDoc,
+  onSnapshot,
+  serverTimestamp,
+} from 'firebase/firestore';
+import { signInWithPopup } from 'firebase/auth';
 import { i18n } from '../../../lib/i18n';
+import { extractYouTubeId } from '../../../lib/youtube';
 import {
   useLiveSession,
   PRESET_COVERS,
@@ -19,8 +31,10 @@ import {
 import {
   CRITERIA_KEYS,
   VALIDATION_CONSTRAINTS,
+  DEFAULT_ROLE_VOTE_WEIGHTS,
   calculateAverageScore,
   calculateFairTrackRating,
+  recalculateCommunityScoresFromReviews,
   getArtistIdFromName,
   type CriteriaKey,
   type CriteriaScores,
@@ -30,6 +44,7 @@ import {
 import {
   auth,
   db,
+  googleProvider,
   handleFirestoreError,
   OperationType,
 } from '../../../lib/firebase';
@@ -49,16 +64,20 @@ export default function TrackDetailPage({
   onSelectArtist,
   onOpenStudio,
 }: TrackPageProps) {
-  const resolvedTrackId = propTrackId ?? params?.id ?? 'track_tbilisi_night';
+  const resolvedTrackId = propTrackId ?? params?.id ?? '';
 
   const {
     tracksQueue,
     session,
     userProfile,
+    currentUserProfile,
+    loading,
     submitTrackReview,
     toggleReviewHelpful,
     selectActiveTrack,
   } = useLiveSession('current');
+
+  const activeUserProfile = currentUserProfile ?? userProfile;
 
   const track =
     tracksQueue.find((t) => t.id === resolvedTrackId) ?? tracksQueue[0] ?? null;
@@ -67,10 +86,13 @@ export default function TrackDetailPage({
 
   const [trackReviews, setTrackReviews] = useState<TrackReview[]>([]);
   const [imgError, setImgError] = useState(false);
+  const [confirmDeleteModalOpen, setConfirmDeleteModalOpen] = useState(false);
+  const [deletingTrack, setDeletingTrack] = useState(false);
+  const [deletingReviewId, setDeletingReviewId] = useState<string | null>(null);
 
   // მომხმარებლის შეფასების ფორმის მდგომარეობა
   const [authorName, setAuthorName] = useState<string>(
-    () => userProfile?.displayName ?? auth.currentUser?.displayName ?? ''
+    () => activeUserProfile?.displayName ?? auth.currentUser?.displayName ?? ''
   );
   const [userScores, setUserScores] = useState<CriteriaScores>({
     lyrics: 8.5,
@@ -83,15 +105,18 @@ export default function TrackDetailPage({
   const [submitSuccess, setSubmitSuccess] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // ხმის წონა და როლი მკაცრად მოდის მხოლოდ ავტორიზებული მომხმარებლის პროფილიდან (userProfile)
-  const currentUserRole: UserRole = userProfile?.role ?? 'viewer';
-  const currentVoteWeight: number = userProfile?.voteWeight ?? 1.0;
+  // ხმის წონა და როლი მკაცრად მოდის მხოლოდ ავტორიზებული მომხმარებლის პროფილიდან (currentUserProfile)
+  const currentUserRole: UserRole = activeUserProfile?.role ?? 'viewer';
+  const currentVoteWeight: number =
+    typeof activeUserProfile?.voteWeight === 'number'
+      ? activeUserProfile.voteWeight
+      : DEFAULT_ROLE_VOTE_WEIGHTS[currentUserRole] ?? 1.0;
 
   useEffect(() => {
-    if (userProfile?.displayName && !authorName) {
-      setAuthorName(userProfile.displayName);
+    if (activeUserProfile?.displayName && !authorName) {
+      setAuthorName(activeUserProfile.displayName);
     }
-  }, [userProfile?.displayName, authorName]);
+  }, [activeUserProfile?.displayName, authorName]);
 
   // რეალური რეცენზიების მოსმენა Firestore-ის ქვეკოლექციიდან: collection(db, 'tracks', trackId, 'reviews')
   useEffect(() => {
@@ -169,16 +194,47 @@ export default function TrackDetailPage({
     return () => unsubscribeReviews();
   }, [currentTrackId, track?.title, track?.artist, track?.coverUrl]);
 
+  if (loading && !track) {
+    return (
+      <div className="max-w-[1360px] mx-auto px-6 py-12 space-y-6 animate-pulse">
+        <div className="h-5 w-40 bg-zinc-800/80 rounded" />
+        <div className="h-56 w-full bg-[#111723] border border-zinc-800/90 rounded-2xl p-8 flex items-center gap-6">
+          <div className="w-40 h-40 rounded-xl bg-zinc-800/80 shrink-0" />
+          <div className="space-y-4 flex-1">
+            <div className="h-4 w-32 bg-zinc-800/80 rounded" />
+            <div className="h-8 w-64 bg-zinc-800/80 rounded" />
+            <div className="h-5 w-48 bg-zinc-800/80 rounded" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!track) {
     return (
-      <div className="max-w-[1280px] mx-auto px-6 py-12 text-zinc-400">
-        {i18n.ui.noActiveTrack}
+      <div className="max-w-[1360px] mx-auto px-6 py-12 space-y-6">
+        <button
+          type="button"
+          onClick={onBackToCatalog}
+          className="inline-flex items-center gap-2 text-sm font-medium text-zinc-400 hover:text-zinc-100 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>{i18n.nav.backToCatalog}</span>
+        </button>
+
+        <div className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-10 text-center text-sm text-zinc-400">
+          კატალოგში ტრეკები ჯერ არ არის. წარადგინეთ პირველი რელიზი!
+        </div>
       </div>
     );
   }
 
   const trimmedLength = reviewText.trim().length;
   const minRequired = VALIDATION_CONSTRAINTS.REVIEW_TEXT_MIN_LENGTH;
+  const hasLongWordWithoutSpaces = reviewText
+    .trim()
+    .split(/\s+/)
+    .some((word) => word.length > 60);
   const isTextValid = trimmedLength >= minRequired;
   const charsRemaining = Math.max(0, minRequired - trimmedLength);
   const userAverage = calculateAverageScore(userScores);
@@ -196,6 +252,83 @@ export default function TrackDetailPage({
     session?.streamStatus !== 'idle' &&
     session?.activeTrackId === track.id;
 
+  const executeTrackDeletion = async () => {
+    if (!track || currentUserRole !== 'admin') return;
+    setDeletingTrack(true);
+    try {
+      await deleteDoc(doc(db, 'tracks', track.id));
+      setConfirmDeleteModalOpen(false);
+      if (onBackToCatalog) {
+        onBackToCatalog();
+      } else {
+        window.history.pushState({}, '', '/');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }
+    } catch (err) {
+      try {
+        handleFirestoreError(err, OperationType.DELETE, `tracks/${track.id}`);
+      } catch {
+        // logged by handleFirestoreError
+      }
+    } finally {
+      setDeletingTrack(false);
+    }
+  };
+
+  const handleDeleteTrackClick = async () => {
+    if (!track || currentUserRole !== 'admin') return;
+    const t0 = Date.now();
+    const confirmed =
+      typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm(i18n.phrases.areYouSure)
+        : false;
+    const elapsedMs = Date.now() - t0;
+
+    if (confirmed) {
+      await executeTrackDeletion();
+    } else if (elapsedMs < 15) {
+      // თუ iframe sandbox-მა დაბლოკა window.confirm, ვაჩვენებთ ჩაშენებულ დადასტურების ფანჯარას
+      setConfirmDeleteModalOpen(true);
+    }
+  };
+
+  const handleDeleteReviewClick = async (reviewId: string) => {
+    if (!track || currentUserRole !== 'admin') return;
+    setDeletingReviewId(reviewId);
+    const trackId = track.id;
+    try {
+      await deleteDoc(doc(db, 'tracks', trackId, 'reviews', reviewId));
+
+      const remainingReviews = trackReviews.filter((r) => r.id !== reviewId);
+      setTrackReviews(remainingReviews);
+
+      const recalculated = recalculateCommunityScoresFromReviews(
+        remainingReviews,
+        track.expertScore
+      );
+
+      await updateDoc(doc(db, 'tracks', trackId), {
+        communityScore: recalculated.communityScore,
+        communityTotalScore: recalculated.communityTotalScore,
+        communityVotesCount: recalculated.communityVotesCount,
+        metaScore: recalculated.metaScore,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      try {
+        handleFirestoreError(
+          err,
+          OperationType.DELETE,
+          `tracks/${trackId}/reviews/${reviewId}`
+        );
+      } catch {
+        // logged by handleFirestoreError
+      }
+    } finally {
+      setDeletingReviewId(null);
+    }
+  };
+
   const handleScoreSlider = (key: CriteriaKey, val: number) => {
     const rounded = Math.min(10, Math.max(1, Math.round(val * 10) / 10));
     setUserScores((prev) => ({
@@ -209,6 +342,11 @@ export default function TrackDetailPage({
     e.preventDefault();
     setFormError(null);
 
+    if (hasLongWordWithoutSpaces) {
+      setFormError(i18n.portal.reviewLongWordError);
+      return;
+    }
+
     if (trimmedLength < minRequired) {
       setFormError(
         `${i18n.portal.min100Chars} (${trimmedLength} / ${minRequired})`
@@ -216,11 +354,24 @@ export default function TrackDetailPage({
       return;
     }
 
+    if (!auth.currentUser) {
+      try {
+        await signInWithPopup(auth, googleProvider);
+      } catch {
+        setFormError(i18n.portal.reviewAuthRequired);
+        return;
+      }
+      if (!auth.currentUser) {
+        setFormError(i18n.portal.reviewAuthRequired);
+        return;
+      }
+    }
+
     await submitTrackReview({
       trackId: track.id,
       authorName:
         authorName.trim() ||
-        userProfile?.displayName ||
+        activeUserProfile?.displayName ||
         auth.currentUser?.displayName ||
         'ქართველი მსმენელი',
       scores: userScores,
@@ -261,7 +412,7 @@ export default function TrackDetailPage({
             }}
             className="px-3.5 py-2 text-xs font-medium text-zinc-300 bg-[#111723] border border-zinc-800 rounded-lg hover:border-zinc-700 transition-colors cursor-pointer whitespace-nowrap"
           >
-            {i18n.ui.activateTrack} (Studio)
+            {i18n.ui.activateTrack}
           </button>
         </div>
       </div>
@@ -304,7 +455,7 @@ export default function TrackDetailPage({
                 </span>
               </div>
 
-              <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-zinc-100 tracking-tight balance">
+              <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-zinc-100 tracking-tight text-balance">
                 {track.title}
               </h1>
 
@@ -361,6 +512,60 @@ export default function TrackDetailPage({
                   </>
                 )}
               </div>
+
+              {(track.sourceUrl || track.audioUrl || currentUserRole === 'admin') && (
+                <div className="pt-2 flex flex-wrap items-center gap-3">
+                  {(track.sourceUrl || track.audioUrl) && (
+                    <a
+                      href={track.sourceUrl || track.audioUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-zinc-950 bg-amber-400 hover:bg-amber-300 rounded-xl transition-colors"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>{i18n.portal.openOriginalSource}</span>
+                    </a>
+                  )}
+
+                  {currentUserRole === 'admin' && (
+                    <button
+                      type="button"
+                      disabled={deletingTrack}
+                      onClick={() => void handleDeleteTrackClick()}
+                      className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-red-200 bg-red-500/15 border border-red-500/40 hover:bg-red-500/25 rounded-xl transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                      <span>{i18n.phrases.deleteTrack}</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {confirmDeleteModalOpen && currentUserRole === 'admin' && (
+                <div className="mt-3 p-3.5 rounded-xl bg-red-950/40 border border-red-500/40 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="font-semibold text-red-200">
+                    {i18n.phrases.areYouSure} ({i18n.phrases.deleteTrack})
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteModalOpen(false)}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-300 hover:text-zinc-100 cursor-pointer"
+                    >
+                      {i18n.submitModal.cancelButton}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={deletingTrack}
+                      onClick={() => void executeTrackDeletion()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{i18n.phrases.deleteTrack}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -423,7 +628,43 @@ export default function TrackDetailPage({
           </div>
         </div>
 
-        {/* 5 კრიტერიუმის შედარებითი ზოლი (ექსპერტი vs ხალხის რეიტინგი) */}
+        {/* ჩაშენებული YouTube პლეერი (თუ ტრეკს აქვს YouTube ბმული) */}
+        {(() => {
+          const ytId = extractYouTubeId(track.sourceUrl || track.audioUrl || '');
+          if (!ytId) return null;
+          return (
+            <div className="mt-8 pt-6 border-t border-zinc-800/80 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+                  <Play className="w-4 h-4 text-amber-400" />
+                  <span>{i18n.portal.listenRelease}</span>
+                </h2>
+                {track.sourceUrl && (
+                  <a
+                    href={track.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-amber-400 hover:underline inline-flex items-center gap-1"
+                  >
+                    <span>YouTube</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+              <div className="relative w-full overflow-hidden rounded-xl border border-zinc-800 bg-black aspect-video max-h-[420px]">
+                <iframe
+                  src={`https://www.youtube.com/embed/${ytId}?rel=0`}
+                  title={track.title}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                  className="w-full h-full border-0"
+                />
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* 5 კრიტერიუმის შედარებითი ზოლი (ექსპერტი და ხალხის რეიტინგი) */}
         <div className="mt-8 pt-6 border-t border-zinc-800/80">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-zinc-200">
@@ -625,8 +866,10 @@ export default function TrackDetailPage({
               </div>
             </div>
 
-            {formError && (
-              <p className="text-xs text-red-400 font-medium">{formError}</p>
+            {(formError || hasLongWordWithoutSpaces) && (
+              <p className="text-xs text-red-400 font-medium">
+                {formError || i18n.portal.reviewLongWordError}
+              </p>
             )}
 
             <button
@@ -669,7 +912,7 @@ export default function TrackDetailPage({
 
           {trackReviews.length === 0 ? (
             <div className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-8 text-center text-sm text-zinc-400">
-              პირველი რეცენზია ჯერ არ დაწერილა
+              რეცენზიები ჯერ არ დაწერილა
             </div>
           ) : (
             <div className="space-y-4">
@@ -732,33 +975,50 @@ export default function TrackDetailPage({
                     </div>
 
                     {/* რეცენზიის ტექსტი */}
-                    <p className="text-sm text-zinc-200 leading-relaxed whitespace-pre-line">
+                    <p className="text-sm text-zinc-200 leading-relaxed break-words break-all [overflow-wrap:anywhere] whitespace-pre-wrap">
                       {review.text}
                     </p>
 
-                    {/* ქვედა ზოლი: აპვოუთი "სასარგებლოა" */}
-                    <div className="flex items-center justify-between pt-2">
+                    {/* ქვედა ზოლი: აპვოუთი "სასარგებლოა" და წაშლა (ადმინისთვის) */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                       <span className="text-xs text-zinc-500">
                         {i18n.portal.helpfulReview}
                       </span>
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void toggleReviewHelpful(review.id, track.id)
-                        }
-                        className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                          isHelpfulVoted
-                            ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
-                            : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700'
-                        }`}
-                      >
-                        <ThumbsUp className="w-3.5 h-3.5" />
-                        <span>{i18n.portal.helpfulLabel}</span>
-                        <span className="font-mono-tabular font-bold">
-                          ({review.helpfulCount})
-                        </span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {currentUserRole === 'admin' && (
+                          <button
+                            type="button"
+                            disabled={deletingReviewId === review.id}
+                            title={i18n.phrases.deleteReview}
+                            onClick={() =>
+                              void handleDeleteReviewClick(review.id)
+                            }
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 transition-colors cursor-pointer whitespace-nowrap"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                            <span>{i18n.phrases.deleteShort}</span>
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void toggleReviewHelpful(review.id, track.id)
+                          }
+                          className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                            isHelpfulVoted
+                              ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                              : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                          }`}
+                        >
+                          <ThumbsUp className="w-3.5 h-3.5" />
+                          <span>{i18n.portal.helpfulLabel}</span>
+                          <span className="font-mono-tabular font-bold">
+                            ({review.helpfulCount})
+                          </span>
+                        </button>
+                      </div>
                     </div>
                   </article>
                 );

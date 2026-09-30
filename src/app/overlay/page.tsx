@@ -72,10 +72,12 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
             ...(snapshot.data() as Omit<Track, 'id'>),
             id: snapshot.id,
           });
+        } else {
+          setFallbackTrack(null);
         }
       },
       () => {
-        // ignore fallback errors
+        setFallbackTrack(null);
       }
     );
 
@@ -100,47 +102,81 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
     }
   }, [embedded]);
 
-  const status: LiveStreamStatus = session?.streamStatus ?? 'listening';
+  // ლოკალური და ტაბებს შორის სინქრონიზაცია მყისიერი პრევიუსთვის სტუდიაში
+  useEffect(() => {
+    const handleSyncEvent = (event: Event) => {
+      const custom = event as CustomEvent<{ session?: LiveSession }>;
+      if (custom.detail?.session) {
+        setSession(custom.detail.session);
+      }
+    };
+
+    window.addEventListener('soundcheck:live-sync', handleSyncEvent);
+
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        channel = new BroadcastChannel('soundcheck_live_channel');
+        channel.onmessage = (msg) => {
+          if (msg.data?.session) {
+            setSession(msg.data.session as LiveSession);
+          }
+        };
+      } catch {
+        // ignore
+      }
+    }
+
+    return () => {
+      window.removeEventListener('soundcheck:live-sync', handleSyncEvent);
+      if (channel) channel.close();
+    };
+  }, []);
+
+  const status: LiveStreamStatus = session?.streamStatus ?? 'idle';
   const isRevealed = status === 'revealed';
+  const snapshot = session?.activeTrackSnapshot ?? null;
+  const showOverlay = session?.showObsOverlay ?? true;
+  const obsTheme = session?.obsTheme ?? 'dark';
 
   // 3. პირდაპირი მიბმა სტრიმერის დრაფტზე (`session.liveExpertDraft`) ყოველ სნაპშოტზე
   const displayedScores: CriteriaScores =
     session?.liveExpertDraft ??
-    session?.activeTrackSnapshot?.expertScore ??
+    snapshot?.expertScore ??
     fallbackTrack?.expertScore ??
     INITIAL_CRITERIA_SCORES;
 
   const averageScore = calculateAverageScore(displayedScores);
   const communityScore =
-    session?.activeTrackSnapshot?.communityTotalScore ??
-    fallbackTrack?.communityTotalScore ??
-    8.6;
+    snapshot?.communityTotalScore ?? fallbackTrack?.communityTotalScore ?? null;
 
   const metaScore =
+    snapshot?.metaScore ??
     calculateMetaScore(
       displayedScores,
-      fallbackTrack?.communityScore ?? {
-        lyrics: communityScore,
-        flow: communityScore,
-        production: communityScore,
-        identity: communityScore,
-        vibe: communityScore,
-      }
-    ) ?? Math.round(averageScore * 10);
+      fallbackTrack?.communityScore ?? null
+    ) ??
+    Math.round(averageScore * 10);
 
-  // 4. ტრეკის სახელწოდება, არტისტი და გარეკანი პირველ რიგში მოდის `session.activeTrackSnapshot`-იდან (ფოლბექით `tracks/{activeTrackId}`-ზე)
+  // 4. ტრეკის სახელწოდება, არტისტი და გარეკანი მოდის სნაპშოტიდან ან რეალურად არსებული ტრეკიდან (`tracks/{activeTrackId}`)
   const trackTitle =
-    session?.activeTrackSnapshot?.title ||
-    fallbackTrack?.title ||
-    i18n.ui.noActiveTrack;
-  const trackArtist =
-    session?.activeTrackSnapshot?.artist ||
-    fallbackTrack?.artist ||
-    '—';
+    snapshot?.title || fallbackTrack?.title || i18n.ui.noActiveTrack;
+  const trackArtist = snapshot?.artist || fallbackTrack?.artist || '—';
   const trackCover =
-    session?.activeTrackSnapshot?.coverUrl ||
-    fallbackTrack?.coverUrl ||
-    PRESET_COVERS.vinyl;
+    snapshot?.coverUrl || fallbackTrack?.coverUrl || PRESET_COVERS.vinyl;
+
+  const themeCardClass =
+    obsTheme === 'neon'
+      ? 'max-w-[540px] bg-[#090B14]/92 border-fuchsia-500/40 shadow-[0_24px_70px_rgba(217,70,239,0.25)]'
+      : obsTheme === 'minimal'
+        ? 'max-w-[540px] bg-[#0B0F17]/80 border-zinc-700/50 shadow-none'
+        : obsTheme === 'compact'
+          ? 'max-w-[440px] bg-[#0B0F17]/95 border-zinc-800/90 shadow-2xl'
+          : 'max-w-[540px] bg-[#0B0F17]/92 border-zinc-800/90 shadow-2xl';
+
+  if (!showOverlay && !embedded) {
+    return <div className="min-h-screen w-full bg-transparent" />;
+  }
 
   return (
     <div
@@ -148,7 +184,11 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
         embedded ? 'py-4' : 'min-h-screen p-8 flex items-end justify-start'
       } bg-transparent select-none`}
     >
-      <div className="relative w-full max-w-[540px] bg-[#0B0F17]/92 backdrop-blur-md border border-zinc-800/90 rounded-2xl p-6 text-zinc-100 shadow-2xl overflow-hidden">
+      <div
+        className={`relative w-full backdrop-blur-md border rounded-2xl p-6 text-zinc-100 overflow-hidden transition-all duration-300 ${themeCardClass} ${
+          !showOverlay && embedded ? 'opacity-45 grayscale' : 'opacity-100'
+        }`}
+      >
         {/* ზედა სტატუსის ზოლი ქართულად */}
         <div className="flex items-center justify-between gap-3 pb-4 mb-5 border-b border-zinc-800/80 text-xs">
           <div className="flex items-center gap-2 text-zinc-300">
@@ -225,7 +265,7 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
               <div>
                 <span>{i18n.ui.communityPrediction}: </span>
                 <span className="font-mono-tabular font-semibold text-zinc-200 text-sm">
-                  {communityScore.toFixed(1)}
+                  {communityScore !== null ? communityScore.toFixed(1) : '—'}
                 </span>
               </div>
             </div>

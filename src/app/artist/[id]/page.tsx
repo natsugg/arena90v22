@@ -9,6 +9,7 @@ import {
   ArrowUpRight,
   Plus,
   Radio,
+  Lock,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -29,6 +30,7 @@ import {
   calculateAverageScore,
   calculateFairTrackRating,
   calculateArtistRadarAnalytics,
+  canUserPublishTrack,
   getArtistIdFromName,
   type Track,
 } from '../../../types';
@@ -50,15 +52,24 @@ export default function ArtistProfilePage({
   onSelectArtist,
   onOpenSubmitModal,
 }: ArtistPageProps) {
-  const rawArtistId = propArtistId ?? params?.id ?? 'artist_kordz_moku';
+  const rawArtistId = propArtistId ?? params?.id ?? '';
   const decodedId = decodeURIComponent(rawArtistId);
 
-  const { tracksQueue, artists, reviews, launchTrackOnAir } =
-    useLiveSession('current');
+  const {
+    tracksQueue,
+    artists,
+    reviews,
+    currentUserProfile,
+    loading,
+    launchTrackOnAir,
+  } = useLiveSession('current');
+  const canPublishTrack = canUserPublishTrack(currentUserProfile?.role);
   const [avatarError, setAvatarError] = useState(false);
 
   // არტისტის მოძებნა ID-ით ან სახელით
   const artist = useMemo(() => {
+    if (!decodedId) return artists[0] ?? null;
+
     const byId = artists.find((a) => a.id === decodedId);
     if (byId) return byId;
 
@@ -71,7 +82,7 @@ export default function ArtistProfilePage({
     );
     if (byName) return byName;
 
-    return artists[0];
+    return artists[0] ?? null;
   }, [artists, decodedId]);
 
   // არტისტის ყველა ტრეკი პლატფორმაზე
@@ -92,10 +103,55 @@ export default function ArtistProfilePage({
     [artistTracks]
   );
 
+  if (loading && !artist) {
+    return (
+      <div className="max-w-[1360px] mx-auto px-6 py-12 space-y-6 animate-pulse">
+        <div className="h-5 w-40 bg-zinc-800/80 rounded" />
+        <div className="h-48 w-full bg-[#111723] border border-zinc-800/90 rounded-2xl p-8 flex items-center gap-6">
+          <div className="w-32 h-32 rounded-2xl bg-zinc-800/80 shrink-0" />
+          <div className="space-y-4 flex-1">
+            <div className="h-4 w-32 bg-zinc-800/80 rounded" />
+            <div className="h-8 w-56 bg-zinc-800/80 rounded" />
+            <div className="h-4 w-72 bg-zinc-800/80 rounded" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!artist) {
     return (
-      <div className="max-w-[1360px] mx-auto px-6 py-12 text-zinc-400">
-        {i18n.artist.profileTitle} ვერ მოიძებნა
+      <div className="max-w-[1360px] mx-auto px-6 py-12 space-y-6">
+        <button
+          type="button"
+          onClick={onBackToCatalog}
+          className="inline-flex items-center gap-2 text-sm font-medium text-zinc-400 hover:text-zinc-100 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>{i18n.nav.backToCatalog}</span>
+        </button>
+
+        <div className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-10 text-center space-y-4">
+          <p className="text-sm md:text-base font-medium text-zinc-300">
+            არტისტები ჯერ არ მოიძებნა
+          </p>
+          {onOpenSubmitModal && canPublishTrack ? (
+            <div>
+              <button
+                type="button"
+                onClick={() => onOpenSubmitModal()}
+                className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-xl transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{i18n.phrases.submitTrack}</span>
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-500">
+              {i18n.phrases.accessRestricted} · {i18n.phrases.expertsOnly}
+            </p>
+          )}
+        </div>
       </div>
     );
   }
@@ -236,7 +292,7 @@ export default function ArtistProfilePage({
                   </a>
                 )}
 
-                {onOpenSubmitModal && (
+                {onOpenSubmitModal && canPublishTrack && (
                   <button
                     type="button"
                     onClick={() => onOpenSubmitModal(artist.name)}
@@ -458,7 +514,7 @@ export default function ArtistProfilePage({
             </p>
           </div>
 
-          {onOpenSubmitModal && (
+          {onOpenSubmitModal && canPublishTrack ? (
             <button
               type="button"
               onClick={() => onOpenSubmitModal(artist.name)}
@@ -467,6 +523,11 @@ export default function ArtistProfilePage({
               <Plus className="w-4 h-4" />
               <span>{i18n.submitModal.title}</span>
             </button>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-500 bg-[#0B0F17] border border-zinc-800 rounded-lg select-none whitespace-nowrap">
+              <Lock className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+              <span>{i18n.phrases.expertsOnly}</span>
+            </span>
           )}
         </div>
 
@@ -502,6 +563,10 @@ export default function ArtistProfilePage({
                     src={track.coverUrl || PRESET_COVERS.vinyl}
                     alt={track.title}
                     referrerPolicy="no-referrer"
+                    onError={(e) => {
+                      e.currentTarget.onerror = null;
+                      e.currentTarget.src = PRESET_COVERS.vinyl;
+                    }}
                     className="w-14 h-14 rounded-xl object-cover bg-zinc-900 border border-zinc-800 shrink-0"
                   />
 

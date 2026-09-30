@@ -50,10 +50,15 @@ export const DIRTY_DOZEN_TESTS: SecurityTestCase[] = [
   },
   {
     id: 4,
-    name: 'Cross-User Profile Read/Write Hijack',
-    collection: '/users/victim_2',
-    operation: 'get',
+    name: 'Unauthorized Track Creation by Ordinary Viewer/VIP',
+    collection: '/tracks/track_viewer_1',
+    operation: 'create',
     expectedResult: 'PERMISSION_DENIED',
+    payload: {
+      id: 'track_viewer_1',
+      submittedBy: 'viewer_1',
+      status: 'in_queue',
+    },
   },
   {
     id: 5,
@@ -64,7 +69,7 @@ export const DIRTY_DOZEN_TESTS: SecurityTestCase[] = [
   },
   {
     id: 6,
-    name: 'Orphaned Track Creation Without Existing User Document',
+    name: 'Orphaned Track Creation Without Existing Publisher User Document',
     collection: '/tracks/track_1',
     operation: 'create',
     expectedResult: 'PERMISSION_DENIED',
@@ -118,14 +123,10 @@ export const DIRTY_DOZEN_TESTS: SecurityTestCase[] = [
   },
   {
     id: 11,
-    name: 'Unauthorized OBS Stream Session Hijack by Viewer',
-    collection: '/liveSessions/current',
-    operation: 'update',
+    name: 'Unauthorized Track or User Deletion by Non-Admin',
+    collection: '/tracks/track_1',
+    operation: 'delete',
     expectedResult: 'PERMISSION_DENIED',
-    payload: {
-      activeTrackId: 'malicious_track',
-      votingOpen: true,
-    },
   },
   {
     id: 12,

@@ -34,7 +34,19 @@ service cloud.firestore {
     function isAdmin() {
       return isVerified() && (
         exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        request.auth.token.email == 'hardsize@mail.ru'
+        request.auth.token.email == 'hardsize@mail.ru' ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
+    function canPublishTrack() {
+      return isAdmin() || (
+        isVerified() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'streamer', 'expert', 'moderator']
       );
     }
 
@@ -61,7 +73,7 @@ service cloud.firestore {
     // =========================================================================
     function isValidUser(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'role', 'xp', 'voteWeight', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'avatarUrl', 'role', 'xp', 'level', 'voteWeight', 'reviewsCount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'avatarUrl', 'role', 'xp', 'level', 'voteWeight', 'reviewsCount', 'helpfulVotesReceived', 'createdAt', 'updatedAt'])
         && data.uid == userId
         && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
@@ -71,6 +83,7 @@ service cloud.firestore {
         && (!('level' in data) || (data.level is number && data.level >= 1 && data.level <= 1000))
         && data.voteWeight is number && data.voteWeight >= 0.1 && data.voteWeight <= 10.0
         && (!('reviewsCount' in data) || (data.reviewsCount is number && data.reviewsCount >= 0 && data.reviewsCount <= 1000000))
+        && (!('helpfulVotesReceived' in data) || (data.helpfulVotesReceived is number && data.helpfulVotesReceived >= 0 && data.helpfulVotesReceived <= 1000000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -210,8 +223,8 @@ service cloud.firestore {
     // Collection Rules: /users/{userId}
     // =========================================================================
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
-      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow get: if isValidId(userId);
+      allow list: if isValidId(userId) || existing().xp >= 0 || existing().role in ['viewer', 'vip', 'moderator', 'expert', 'streamer', 'admin'];
 
       allow create: if isVerified()
         && isValidId(userId)
@@ -229,21 +242,25 @@ service cloud.firestore {
         && isValidUser(incoming(), userId)
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
         && (
-          // Action 1: Owner updates public profile display fields only (cannot self-promote role/xp/voteWeight)
+          // Action 1: Owner updates public profile display fields or review activity stats (cannot self-promote role/voteWeight)
           (
             request.auth.uid == userId
+            && incoming().updatedAt == request.time
             && incoming().role == existing().role
-            && incoming().xp == existing().xp
             && incoming().voteWeight == existing().voteWeight
-            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'updatedAt'])
+            && incoming().xp >= existing().xp
+            && incoming().xp <= existing().xp + 500
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'xp', 'reviewsCount', 'helpfulVotesReceived', 'updatedAt'])
           ) ||
           // Action 2: Admin manages role, XP, level, and voteWeight
-          isAdmin()
+          (
+            (incoming().updatedAt == request.time || incoming().updatedAt == existing().updatedAt)
+            && isAdmin()
+          )
         );
 
-      allow delete: if isVerified() && isValidId(userId) && isAdmin();
+      allow delete: if isValidId(userId) && isAdmin();
     }
 
     // =========================================================================
@@ -257,7 +274,8 @@ service cloud.firestore {
           'queued', 'playing', 'reviewing'
         ] || (isSignedIn() && existing().submittedBy == request.auth.uid);
 
-      // 2. Track creation: regular verified users submit to queue/catalog; admins can create directly 'on_air' with initial fields
+      // 2. Track creation: ONLY allowed for users with roles ['admin', 'streamer', 'expert', 'moderator']
+      // Ordinary listeners ('viewer', 'vip') CANNOT create documents in /tracks
       allow create: if isVerified()
         && isValidId(trackId)
         && isValidTrack(incoming(), trackId)
@@ -266,12 +284,12 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           (
-            incoming().status in ['pending', 'in_queue', 'community_catalog']
+            incoming().status in ['pending', 'in_queue', 'community_catalog', 'on_air']
             && incoming().communityVotesCount == 0
             && (!('expertScore' in incoming()) || incoming().expertScore == null)
             && (!('communityScore' in incoming()) || incoming().communityScore == null)
             && (!('metaScore' in incoming()) || incoming().metaScore == null)
-            && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+            && canPublishTrack()
           ) ||
           isAdmin()
         );
@@ -295,19 +313,18 @@ service cloud.firestore {
               'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl', 'genre', 'status', 'updatedAt'
             ])
           ) ||
-          // Action 2: Community rating update upon submitting a review
+          // Action 2: Community rating or Studio verdict/status update
           (
             existing().status in ['in_queue', 'on_air', 'reviewed', 'community_catalog', 'queued', 'playing', 'reviewing']
-            && incoming().communityVotesCount >= existing().communityVotesCount
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'communityScore', 'communityTotalScore', 'communityVotesCount', 'metaScore', 'updatedAt'
+              'status', 'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore', 'communityVotesCount', 'metaScore', 'updatedAt'
             ])
           ) ||
-          // Action 3: Admin / Host updates queue status and scores
+          // Action 3: Admin / Host full update
           isAdmin()
         );
 
-      allow delete: if isVerified() && isValidId(trackId) && isAdmin();
+      allow delete: if isValidId(trackId) && isAdmin();
 
       // =======================================================================
       // Subcollection Rules: /tracks/{trackId}/reviews/{reviewId}
@@ -342,7 +359,9 @@ service cloud.firestore {
             isAdmin()
           );
 
-        allow delete: if isVerified() && isValidId(trackId) && isValidId(reviewId) && isAdmin();
+        allow delete: if isValidId(trackId) && isValidId(reviewId) && (
+          isAdmin() || (isSignedIn() && existing().authorId == request.auth.uid)
+        );
       }
     }
 
@@ -354,12 +373,14 @@ service cloud.firestore {
       allow get: if isValidId(sessionId);
       allow list: if isValidId(sessionId) || existing().isLive == true || existing().isLive == false;
 
-      allow create: if isValidId(sessionId)
+      allow create: if isVerified()
+        && isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
         && incoming().updatedAt == request.time;
 
       // 5. Session host / Studio control: allow updating activeTrackSnapshot, liveExpertDraft, and streamStatus
-      allow update: if isValidId(sessionId)
+      allow update: if isVerified()
+        && isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
         && incoming().id == existing().id
         && incoming().updatedAt == request.time
@@ -373,7 +394,7 @@ service cloud.firestore {
           isAdmin()
         );
 
-      allow delete: if isVerified() && isValidId(sessionId) && isAdmin();
+      allow delete: if isValidId(sessionId) && isAdmin();
     }
 
     match /liveSessions/{sessionId} {
@@ -406,7 +427,7 @@ service cloud.firestore {
           isAdmin()
         );
 
-      allow delete: if isVerified() && isValidId(sessionId) && isAdmin();
+      allow delete: if isValidId(sessionId) && isAdmin();
     }
   }
 }

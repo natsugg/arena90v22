@@ -45,6 +45,10 @@
           "type": "number",
           "description": "Total number of track reviews submitted by the user."
         },
+        "helpfulVotesReceived": {
+          "type": "number",
+          "description": "Total number of helpful votes received across the user's reviews."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

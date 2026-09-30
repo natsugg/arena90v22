@@ -7,8 +7,9 @@ import {
   Check,
   LogIn,
   Link2,
-  Image as ImageIcon,
+  ImageIcon,
   UserCheck,
+  Lock,
 } from 'lucide-react';
 import {
   signInWithPopup,
@@ -19,7 +20,11 @@ import { auth, googleProvider } from '../lib/firebase';
 import { i18n } from '../lib/i18n';
 import { fetchYouTubeMetadata, extractYouTubeId } from '../lib/youtube';
 import { useLiveSession, PRESET_COVERS } from '../hooks/useLiveSession';
-import { VALIDATION_CONSTRAINTS, type Track } from '../types';
+import {
+  VALIDATION_CONSTRAINTS,
+  canUserPublishTrack,
+  type Track,
+} from '../types';
 
 export interface SubmitTrackModalProps {
   isOpen?: boolean;
@@ -34,7 +39,9 @@ export default function SubmitTrackModal({
   defaultArtist = '',
   onSubmitted,
 }: SubmitTrackModalProps) {
-  const { submitNewTrack } = useLiveSession('current');
+  const { submitNewTrack, tracksQueue, currentUserProfile } =
+    useLiveSession('current');
+  const canPublishTrack = canUserPublishTrack(currentUserProfile?.role);
 
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(
     () => auth.currentUser
@@ -129,6 +136,44 @@ export default function SubmitTrackModal({
       return;
     }
 
+    const incomingVideoId = extractYouTubeId(cleanSource);
+    const isDuplicate = tracksQueue.some((t) => {
+      if (!t.sourceUrl) return false;
+      if (t.sourceUrl.trim().toLowerCase() === cleanSource.toLowerCase()) {
+        return true;
+      }
+      if (incomingVideoId) {
+        const existingVideoId = extractYouTubeId(t.sourceUrl);
+        return existingVideoId === incomingVideoId;
+      }
+      return false;
+    });
+
+    if (isDuplicate) {
+      setErrorMsg(i18n.submitModal.validationDuplicateUrl);
+      return;
+    }
+
+    if (!auth.currentUser) {
+      try {
+        await signInWithPopup(auth, googleProvider);
+      } catch {
+        setErrorMsg(i18n.submitModal.validationAuthRequired);
+        return;
+      }
+      if (!auth.currentUser) {
+        setErrorMsg(i18n.submitModal.validationAuthRequired);
+        return;
+      }
+    }
+
+    if (!canPublishTrack) {
+      setErrorMsg(
+        `${i18n.phrases.accessRestricted} — ${i18n.phrases.expertsOnly}`
+      );
+      return;
+    }
+
     setSubmitting(true);
     try {
       const createdTrack = await submitNewTrack({
@@ -205,10 +250,16 @@ export default function SubmitTrackModal({
         {/* ავტორიზებული მუსიკოსის / მომხმარებლის სტატუსის ზოლი */}
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-[#0B0F17] border border-zinc-800/90 text-xs">
           <div className="flex items-center gap-2.5 text-zinc-300">
-            <UserCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+            {canPublishTrack ? (
+              <UserCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+            )}
             <span>
               {currentUser
-                ? `${currentUser.displayName || currentUser.email || 'ავტორიზებული მუსიკოსი'}`
+                ? canPublishTrack
+                  ? `${currentUser.displayName || currentUser.email} (${i18n.roles[currentUserProfile?.role ?? 'viewer']})`
+                  : `${i18n.phrases.accessRestricted} · ${i18n.phrases.expertsOnly}`
                 : i18n.submitModal.authNotice}
             </span>
           </div>
@@ -339,6 +390,10 @@ export default function SubmitTrackModal({
                   src={coverUrl}
                   alt={i18n.ui.coverPreview}
                   referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    e.currentTarget.onerror = null;
+                    e.currentTarget.src = PRESET_COVERS.vinyl;
+                  }}
                   className="w-11 h-11 rounded-lg object-cover bg-zinc-900 border border-zinc-800 shrink-0"
                 />
               )}

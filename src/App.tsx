@@ -10,7 +10,7 @@ import {
   onAuthStateChanged,
   type User as FirebaseUser,
 } from 'firebase/auth';
-import { Copy, Check, LogIn, LogOut, Plus } from 'lucide-react';
+import { Copy, Check, LogIn, LogOut, Plus, Lock } from 'lucide-react';
 import RootLayout from './app/layout';
 import HomePage from './app/page';
 import TrackDetailPage from './app/track/[id]/page';
@@ -18,6 +18,11 @@ import ArtistProfilePage from './app/artist/[id]/page';
 import StudioPage from './app/studio/page';
 import OverlayPage from './app/overlay/page';
 import SubmitTrackModal from './components/SubmitTrackModal';
+import {
+  clearLegacyDemoCache,
+  useLiveSession,
+} from './hooks/useLiveSession';
+import { canUserPublishTrack } from './types';
 import { auth, googleProvider } from './lib/firebase';
 import { i18n } from './lib/i18n';
 
@@ -32,8 +37,8 @@ interface RouteState {
 function detectInitialRoute(): RouteState {
   const defaultState: RouteState = {
     view: 'catalog',
-    trackId: 'track_tbilisi_night',
-    artistId: 'artist_kordz_moku',
+    trackId: '',
+    artistId: '',
   };
 
   if (typeof window === 'undefined') {
@@ -73,7 +78,7 @@ function detectInitialRoute(): RouteState {
     return {
       ...defaultState,
       view: 'artist',
-      artistId: idFromPath || 'artist_kordz_moku',
+      artistId: idFromPath,
     };
   }
 
@@ -81,7 +86,7 @@ function detectInitialRoute(): RouteState {
     return {
       ...defaultState,
       view: 'artist',
-      artistId: params.get('id') || 'artist_kordz_moku',
+      artistId: params.get('id') || '',
     };
   }
 
@@ -96,7 +101,7 @@ function detectInitialRoute(): RouteState {
     return {
       ...defaultState,
       view: 'track',
-      trackId: idFromPath || 'track_tbilisi_night',
+      trackId: idFromPath,
     };
   }
 
@@ -104,7 +109,7 @@ function detectInitialRoute(): RouteState {
     return {
       ...defaultState,
       view: 'track',
-      trackId: params.get('id') || 'track_tbilisi_night',
+      trackId: params.get('id') || '',
     };
   }
 
@@ -112,6 +117,8 @@ function detectInitialRoute(): RouteState {
 }
 
 export default function App() {
+  const { currentUserProfile } = useLiveSession('current');
+  const canPublishTrack = canUserPublishTrack(currentUserProfile?.role);
   const [routeState, setRouteState] = useState<RouteState>(() =>
     detectInitialRoute()
   );
@@ -119,6 +126,10 @@ export default function App() {
   const [copiedObs, setCopiedObs] = useState(false);
   const [submitModalOpen, setSubmitModalOpen] = useState(false);
   const [submitModalArtist, setSubmitModalArtist] = useState<string>('');
+
+  useEffect(() => {
+    clearLegacyDemoCache();
+  }, []);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -226,7 +237,7 @@ export default function App() {
   return (
     <RootLayout>
       {/* 3-ზონიანი Top Bar Contract */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/90 bg-[#0B0F17]">
+      <header className="flex flex-wrap items-center justify-between gap-y-3 gap-x-4 px-4 sm:px-6 py-4 border-b border-zinc-800/90 bg-[#0B0F17]">
         {/* ზონა 1: ბრენდის სახელწოდება (ერთი ელემენტი) */}
         <a
           href="/"
@@ -240,7 +251,7 @@ export default function App() {
         </a>
 
         {/* ზონა 2: ნავიგაციის ბმულები */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-zinc-400">
+        <nav className="order-3 md:order-2 w-full md:w-auto flex flex-wrap items-center gap-4 sm:gap-6 text-xs sm:text-sm font-medium text-zinc-400 pt-2 md:pt-0 border-t md:border-t-0 border-zinc-800/60">
           <button
             type="button"
             onClick={() => navigate('catalog')}
@@ -287,15 +298,25 @@ export default function App() {
         </nav>
 
         {/* ზონა 3: ძირითადი მოქმედებები */}
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => handleOpenSubmitModal()}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg hover:bg-amber-500/20 transition-colors whitespace-nowrap cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>{i18n.nav.submitTrack}</span>
-          </button>
+        <div className="order-2 md:order-3 flex items-center gap-2 sm:gap-3">
+          {canPublishTrack ? (
+            <button
+              type="button"
+              onClick={() => handleOpenSubmitModal()}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg hover:bg-amber-500/20 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{i18n.nav.submitTrack}</span>
+            </button>
+          ) : (
+            <span
+              title={`${i18n.phrases.accessRestricted} — ${i18n.phrases.expertsOnly}`}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-500 bg-[#111723] border border-zinc-800/80 rounded-lg select-none whitespace-nowrap"
+            >
+              <Lock className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+              <span>{i18n.phrases.expertsOnly}</span>
+            </span>
+          )}
 
           <button
             type="button"

@@ -8,6 +8,7 @@ import {
   setDoc,
   getDoc,
   updateDoc,
+  deleteDoc,
   increment,
   serverTimestamp,
 } from 'firebase/firestore';
@@ -22,6 +23,7 @@ import {
   calculateAverageScore,
   calculateMetaScore,
   computeUpdatedCommunityScores,
+  recalculateCommunityScoresFromReviews,
   getArtistIdFromName,
   DEFAULT_ROLE_VOTE_WEIGHTS,
   type ArtistProfile,
@@ -49,633 +51,70 @@ export const PRESET_COVERS = {
   postpunk: blackSeaPostpunkImg,
 };
 
-const STORAGE_SESSION_KEY = 'soundcheck_live_session_v3';
-const STORAGE_TRACKS_KEY = 'soundcheck_tracks_catalog_v3';
-const STORAGE_REVIEWS_KEY = 'soundcheck_tracks_reviews_v3';
-const STORAGE_CRITICS_KEY = 'soundcheck_top_critics_v3';
+const LEGACY_DEMO_STORAGE_KEYS = [
+  'soundcheck_tracks_catalog_v3',
+  'soundcheck_tracks_reviews_v3',
+  'soundcheck_top_critics_v3',
+  'soundcheck_live_session_v3',
+] as const;
+
+let legacyDemoCacheCleaned = false;
+
+/**
+ * ერთჯერადი გასუფთავება ძველი დემო-მონაცემების გასაღებებისგან localStorage-ში
+ */
+export function clearLegacyDemoCache(): void {
+  if (legacyDemoCacheCleaned || typeof window === 'undefined') return;
+  legacyDemoCacheCleaned = true;
+  try {
+    for (const key of LEGACY_DEMO_STORAGE_KEYS) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // ignore storage access errors
+  }
+}
+
+clearLegacyDemoCache();
+
 const SYNC_EVENT_NAME = 'soundcheck:live-sync';
 const BROADCAST_CHANNEL_NAME = 'soundcheck_live_channel';
 
 export const INITIAL_CRITERIA_SCORES: CriteriaScores = {
-  lyrics: 8.6,
-  flow: 9.0,
-  production: 9.4,
-  identity: 8.9,
-  vibe: 9.2,
+  lyrics: 8.0,
+  flow: 8.0,
+  production: 8.0,
+  identity: 8.0,
+  vibe: 8.0,
 };
-
-const NOW = Date.now();
-const DAY_MS = 86_400_000;
-
-export const INITIAL_ARTISTS: ArtistProfile[] = [
-  {
-    id: 'artist_kordz_moku',
-    name: 'KORDZ & MOKU T',
-    bio: 'ქართული ელექტრონული სცენისა და ალტერნატიული ჰიპ-ჰოპის კოლაბორაციული პროექტი. გამოირჩევა რთული სინთეზური არანჟირებით, პოლირიტმული ფლოუთი და თბილისური ურბანული ჟღერადობით.',
-    avatarUrl: defaultCoverImg,
-    genres: ['ელექტრონული ჰიპ-ჰოპი', 'უკ-გარაჟი', 'სინთ-ფანკი'],
-    city: 'თბილისი',
-    socialLinks: {
-      spotify: 'https://open.spotify.com',
-      youtube: 'https://youtube.com',
-      soundcloud: 'https://soundcloud.com',
-      instagram: 'https://instagram.com',
-    },
-  },
-  {
-    id: 'artist_nikakoi_tba',
-    name: 'NIKAKOI & TBA',
-    bio: 'ქართული IDM-ისა და ემბიენტ-ელექტრონიკის პიონერული დუეტი. ქმნის ანალოგური სინთეზატორებისა და კავკასიური აკუსტიკური ტექსტურების უნიკალურ აუდიო-არქიტექტურას.',
-    avatarUrl: caucasusSynthImg,
-    genres: ['IDM / სინთვეივი', 'ემბიენტ-ელექტრონიკა', 'ექსპერიმენტული'],
-    city: 'თბილისი',
-    socialLinks: {
-      spotify: 'https://open.spotify.com',
-      youtube: 'https://youtube.com',
-      soundcloud: 'https://soundcloud.com',
-    },
-  },
-  {
-    id: 'artist_tamada_jazz',
-    name: 'TAMADA & JAZZ ENSEMBLE',
-    bio: 'თანამედროვე ქართული ნუ-ჯაზის, ფიუჟენისა და ტრადიციული მრავალხმიანი ინტონაციების სინთეზი ცოცხალი სასულე და პერკუსიული სექციით.',
-    avatarUrl: rustaveliJazzImg,
-    genres: ['ნუ-ჯაზი / ფიუჟენი', 'ეთნო-ელექტრონიკა', 'სოული'],
-    city: 'თბილისი',
-    socialLinks: {
-      spotify: 'https://open.spotify.com',
-      youtube: 'https://youtube.com',
-      instagram: 'https://instagram.com',
-    },
-  },
-  {
-    id: 'artist_eko_vinda',
-    name: 'EKO & VINDA FOLIO',
-    bio: 'შავი ზღვისპირა პოსტ-პანკისა და ინდი-როკის გამორჩეული წარმომადგენლები. პოეტური ქართული ტექსტები, მელანქოლიური გიტარის რიფები და დრამ-მანქანების ჰიპნოზური პულსაცია.',
-    avatarUrl: blackSeaPostpunkImg,
-    genres: ['პოსტ-პანკი / ინდი', 'კოლდვეივი', 'ალტერნატიული როკი'],
-    city: 'ბათუმი / თბილისი',
-    socialLinks: {
-      spotify: 'https://open.spotify.com',
-      youtube: 'https://youtube.com',
-      soundcloud: 'https://soundcloud.com',
-      instagram: 'https://instagram.com',
-    },
-  },
-  {
-    id: 'artist_kayg_luna',
-    name: 'KAY G & LUNA',
-    bio: 'ახალი თაობის ქართული ალტერნატიული R&B და ნეო-სოულ დუეტი. ხავერდოვანი ვოკალური ჰარმონიები, ღრმა ბას-ხაზები და ატმოსფერული ღამის ჟღერადობა.',
-    avatarUrl: studioEmblemImg,
-    genres: ['ალტერნატიული R&B', 'ნეო-სოული', 'ლოუ-ფაი'],
-    city: 'თბილისი',
-    socialLinks: {
-      spotify: 'https://open.spotify.com',
-      youtube: 'https://youtube.com',
-      instagram: 'https://instagram.com',
-    },
-  },
-  {
-    id: 'artist_jeronimo_ice',
-    name: 'JERONIMO & ICE',
-    bio: 'კლასიკური თბილისური ბუმ-ბეპისა და ანდერგრაუნდ ჰიპ-ჰოპის ოსტატები. ვინილის სემპლინგი, მკვეთრი სოციალური ლირიკა და უკომპრომისო სტუდიური ჟღერადობა.',
-    avatarUrl: defaultCoverImg,
-    genres: ['ბუმ-ბეპი / ჰიპ-ჰოპი', 'ანდერგრაუნდ რეპი'],
-    city: 'თბილისი',
-    socialLinks: {
-      spotify: 'https://open.spotify.com',
-      youtube: 'https://youtube.com',
-      soundcloud: 'https://soundcloud.com',
-    },
-  },
-];
-
-export const INITIAL_DEMO_TRACKS: Track[] = [
-  {
-    id: 'track_tbilisi_night',
-    title: 'ღამის თბილისი (Tbilisi Nocturne)',
-    artist: 'KORDZ & MOKU T',
-    artistId: 'artist_kordz_moku',
-    coverUrl: defaultCoverImg,
-    audioUrl: 'https://soundcheck.live/audio/tbilisi-nocturne.mp3',
-    sourceUrl: 'https://open.spotify.com/track/tbilisi-nocturne',
-    genre: 'ელექტრონული ჰიპ-ჰოპი',
-    duration: 214,
-    submittedBy: 'streamer_host',
-    submittedByName: 'სტუდია',
-    isPriority: true,
-    status: 'on_air',
-    expertScore: {
-      lyrics: 8.8,
-      flow: 9.2,
-      production: 9.6,
-      identity: 9.1,
-      vibe: 9.4,
-    },
-    expertTotalScore: 9.2,
-    communityScore: {
-      lyrics: 8.6,
-      flow: 9.0,
-      production: 9.4,
-      identity: 8.9,
-      vibe: 9.2,
-    },
-    communityTotalScore: 9.0,
-    communityVotesCount: 184,
-    metaScore: 91,
-    createdAt: NOW - 4 * DAY_MS,
-    updatedAt: NOW - 1 * DAY_MS,
-  },
-  {
-    id: 'track_metekhi_drift',
-    title: 'მეტეხის ქარი (Metekhi Drift)',
-    artist: 'KORDZ & MOKU T',
-    artistId: 'artist_kordz_moku',
-    coverUrl: studioEmblemImg,
-    audioUrl: 'https://soundcheck.live/audio/metekhi-drift.mp3',
-    sourceUrl: 'https://youtube.com/watch?v=metekhi-drift',
-    genre: 'სინთ-ფანკი',
-    duration: 196,
-    submittedBy: 'critic_giorgi',
-    submittedByName: 'გიორგი მაისურაძე',
-    isPriority: false,
-    status: 'reviewed',
-    expertScore: {
-      lyrics: 8.5,
-      flow: 9.4,
-      production: 9.8,
-      identity: 9.3,
-      vibe: 9.5,
-    },
-    expertTotalScore: 9.3,
-    communityScore: {
-      lyrics: 8.4,
-      flow: 9.1,
-      production: 9.5,
-      identity: 9.0,
-      vibe: 9.3,
-    },
-    communityTotalScore: 9.1,
-    communityVotesCount: 142,
-    metaScore: 92,
-    createdAt: NOW - 11 * DAY_MS,
-    updatedAt: NOW - 3 * DAY_MS,
-  },
-  {
-    id: 'track_kavkasioni_pulse',
-    title: 'კავკასიონის პულსი',
-    artist: 'NIKAKOI & TBA',
-    artistId: 'artist_nikakoi_tba',
-    coverUrl: caucasusSynthImg,
-    audioUrl: 'https://soundcheck.live/audio/kavkasioni-pulse.mp3',
-    sourceUrl: 'https://open.spotify.com/track/kavkasioni-pulse',
-    genre: 'IDM / სინთვეივი',
-    duration: 246,
-    submittedBy: 'critic_giorgi',
-    submittedByName: 'გიორგი მაისურაძე',
-    isPriority: true,
-    status: 'reviewed',
-    expertScore: {
-      lyrics: 8.4,
-      flow: 9.0,
-      production: 9.8,
-      identity: 9.5,
-      vibe: 9.3,
-    },
-    expertTotalScore: 9.2,
-    communityScore: {
-      lyrics: 8.3,
-      flow: 8.8,
-      production: 9.5,
-      identity: 9.2,
-      vibe: 9.1,
-    },
-    communityTotalScore: 9.0,
-    communityVotesCount: 152,
-    metaScore: 91,
-    createdAt: NOW - 9 * DAY_MS,
-    updatedAt: NOW - 2 * DAY_MS,
-  },
-  {
-    id: 'track_kazbegi_aurora',
-    title: 'ყაზბეგის ავრორა',
-    artist: 'NIKAKOI & TBA',
-    artistId: 'artist_nikakoi_tba',
-    coverUrl: caucasusSynthImg,
-    audioUrl: 'https://soundcheck.live/audio/kazbegi-aurora.mp3',
-    sourceUrl: 'https://soundcloud.com/nikakoi/kazbegi-aurora',
-    genre: 'ემბიენტ-ელექტრონიკა',
-    duration: 268,
-    submittedBy: 'critic_nino',
-    submittedByName: 'ნინო ქავთარაძე',
-    isPriority: false,
-    status: 'reviewed',
-    expertScore: {
-      lyrics: 8.0,
-      flow: 8.7,
-      production: 9.9,
-      identity: 9.6,
-      vibe: 9.4,
-    },
-    expertTotalScore: 9.1,
-    communityScore: {
-      lyrics: 8.2,
-      flow: 8.6,
-      production: 9.6,
-      identity: 9.4,
-      vibe: 9.2,
-    },
-    communityTotalScore: 9.0,
-    communityVotesCount: 119,
-    metaScore: 91,
-    createdAt: NOW - 21 * DAY_MS,
-    updatedAt: NOW - 6 * DAY_MS,
-  },
-  {
-    id: 'track_rustaveli_midnight',
-    title: 'რუსთაველის შუაღამე',
-    artist: 'TAMADA & JAZZ ENSEMBLE',
-    artistId: 'artist_tamada_jazz',
-    coverUrl: rustaveliJazzImg,
-    audioUrl: 'https://soundcheck.live/audio/rustaveli-midnight.mp3',
-    sourceUrl: 'https://open.spotify.com/track/rustaveli-midnight',
-    genre: 'ნუ-ჯაზი / ფიუჟენი',
-    duration: 230,
-    submittedBy: 'critic_nino',
-    submittedByName: 'ნინო ქავთარაძე',
-    isPriority: false,
-    status: 'reviewed',
-    expertScore: {
-      lyrics: 9.1,
-      flow: 8.9,
-      production: 9.0,
-      identity: 9.6,
-      vibe: 9.2,
-    },
-    expertTotalScore: 9.2,
-    communityScore: {
-      lyrics: 8.9,
-      flow: 8.7,
-      production: 8.8,
-      identity: 9.3,
-      vibe: 9.0,
-    },
-    communityTotalScore: 8.9,
-    communityVotesCount: 128,
-    metaScore: 91,
-    createdAt: NOW - 14 * DAY_MS,
-    updatedAt: NOW - 3 * DAY_MS,
-  },
-  {
-    id: 'track_batumi_storm',
-    title: 'შავი ზღვის ქარიშხალი',
-    artist: 'EKO & VINDA FOLIO',
-    artistId: 'artist_eko_vinda',
-    coverUrl: blackSeaPostpunkImg,
-    audioUrl: 'https://soundcheck.live/audio/batumi-storm.mp3',
-    sourceUrl: 'https://open.spotify.com/track/batumi-storm',
-    genre: 'პოსტ-პანკი / ინდი',
-    duration: 204,
-    submittedBy: 'critic_levan',
-    submittedByName: 'ლევან ბერიძე',
-    isPriority: false,
-    status: 'reviewed',
-    expertScore: {
-      lyrics: 9.5,
-      flow: 8.4,
-      production: 8.7,
-      identity: 9.3,
-      vibe: 9.1,
-    },
-    expertTotalScore: 9.0,
-    communityScore: {
-      lyrics: 9.3,
-      flow: 8.3,
-      production: 8.6,
-      identity: 9.0,
-      vibe: 8.9,
-    },
-    communityTotalScore: 8.8,
-    communityVotesCount: 116,
-    metaScore: 89,
-    createdAt: NOW - 19 * DAY_MS,
-    updatedAt: NOW - 5 * DAY_MS,
-  },
-  {
-    id: 'track_mtatsminda_echo',
-    title: 'მთაწმინდის ექო',
-    artist: 'KAY G & LUNA',
-    artistId: 'artist_kayg_luna',
-    coverUrl: studioEmblemImg,
-    audioUrl: 'https://soundcheck.live/audio/mtatsminda-echo.mp3',
-    sourceUrl: 'https://open.spotify.com/track/mtatsminda-echo',
-    genre: 'ალტერნატიული R&B',
-    duration: 198,
-    submittedBy: 'streamer_host',
-    submittedByName: 'სტუდია',
-    isPriority: false,
-    status: 'community_catalog',
-    expertScore: {
-      lyrics: 8.2,
-      flow: 8.7,
-      production: 9.0,
-      identity: 8.6,
-      vibe: 8.8,
-    },
-    expertTotalScore: 8.7,
-    communityScore: {
-      lyrics: 8.1,
-      flow: 8.5,
-      production: 8.8,
-      identity: 8.4,
-      vibe: 8.7,
-    },
-    communityTotalScore: 8.5,
-    communityVotesCount: 94,
-    metaScore: 86,
-    createdAt: NOW - 24 * DAY_MS,
-    updatedAt: NOW - 6 * DAY_MS,
-  },
-  {
-    id: 'track_vera_tape',
-    title: 'ვერის ჩანაწერები Vol. 3',
-    artist: 'JERONIMO & ICE',
-    artistId: 'artist_jeronimo_ice',
-    coverUrl: defaultCoverImg,
-    audioUrl: 'https://soundcheck.live/audio/vera-tape.mp3',
-    sourceUrl: 'https://youtu.be/vera-tape-vol3',
-    genre: 'ბუმ-ბეპი / ჰიპ-ჰოპი',
-    duration: 189,
-    submittedBy: 'critic_sandro',
-    submittedByName: 'სანდრო კახიძე',
-    isPriority: true,
-    status: 'in_queue',
-    expertScore: null,
-    expertTotalScore: null,
-    communityScore: {
-      lyrics: 8.9,
-      flow: 8.8,
-      production: 8.4,
-      identity: 8.6,
-      vibe: 8.5,
-    },
-    communityTotalScore: 8.6,
-    communityVotesCount: 73,
-    metaScore: 86,
-    createdAt: NOW - 3600_000 * 3,
-    updatedAt: NOW - 3600_000 * 2,
-  },
-  {
-    id: 'track_sololaki_rain',
-    title: 'სოლოლაკის წვიმა',
-    artist: 'EKO & VINDA FOLIO',
-    artistId: 'artist_eko_vinda',
-    coverUrl: blackSeaPostpunkImg,
-    audioUrl: 'https://soundcheck.live/audio/sololaki-rain.mp3',
-    sourceUrl: 'https://open.spotify.com/track/sololaki-rain',
-    genre: 'პოსტ-პანკი / ინდი',
-    duration: 212,
-    submittedBy: 'critic_levan',
-    submittedByName: 'ლევან ბერიძე',
-    isPriority: false,
-    status: 'in_queue',
-    expertScore: null,
-    expertTotalScore: null,
-    communityScore: {
-      lyrics: 9.2,
-      flow: 8.5,
-      production: 8.8,
-      identity: 9.1,
-      vibe: 9.0,
-    },
-    communityTotalScore: 8.9,
-    communityVotesCount: 41,
-    metaScore: 89,
-    createdAt: NOW - 3600_000 * 1,
-    updatedAt: NOW - 3600_000 * 1,
-  },
-];
-
-export const INITIAL_DEMO_REVIEWS: TrackReview[] = [
-  {
-    id: 'rev_1',
-    trackId: 'track_tbilisi_night',
-    trackTitle: 'ღამის თბილისი (Tbilisi Nocturne)',
-    trackArtist: 'KORDZ & MOKU T',
-    trackCoverUrl: defaultCoverImg,
-    authorId: 'critic_giorgi',
-    authorName: 'გიორგი მაისურაძე',
-    authorRole: 'expert',
-    voteWeight: 5.0,
-    scores: {
-      lyrics: 8.8,
-      flow: 9.3,
-      production: 9.7,
-      identity: 9.1,
-      vibe: 9.5,
-    },
-    totalScore: 9.3,
-    text: 'საოცრად დახვეწილი სინთეზი ქართული ურბანული ჟღერადობისა და თანამედროვე ელექტრონული პროდაქშენის. ბას-ხაზი და სინთეზატორების არანჟირება პირველივე წამებიდან ქმნის ღამის თბილისის კინემატოგრაფიულ ატმოსფეროს, ხოლო MOKU T-ის ფლოუ ზუსტად ჯდება რთულ რიტმულ სტრუქტურაში.',
-    helpfulCount: 42,
-    helpfulVoterIds: [],
-    createdAt: NOW - 3600_000 * 5,
-  },
-  {
-    id: 'rev_2',
-    trackId: 'track_kavkasioni_pulse',
-    trackTitle: 'კავკასიონის პულსი',
-    trackArtist: 'NIKAKOI & TBA',
-    trackCoverUrl: caucasusSynthImg,
-    authorId: 'critic_nino',
-    authorName: 'ნინო ქავთარაძე',
-    authorRole: 'vip',
-    voteWeight: 2.0,
-    scores: {
-      lyrics: 8.4,
-      flow: 8.9,
-      production: 9.8,
-      identity: 9.5,
-      vibe: 9.2,
-    },
-    totalScore: 9.2,
-    text: 'მიქსინგი და ხმის დიზაინი უმაღლეს დონეზეა შესრულებული. IDM-ის და ანალოგური სინთეზატორების ტექსტურები ქმნის სივრცულ, ცივ და ამავდროულად ძალიან ემოციურ გარემოს. წლის ერთ-ერთი ყველაზე გამორჩეული ინსტრუმენტული და ვოკალური ნამუშევარია ქართულ სცენაზე.',
-    helpfulCount: 31,
-    helpfulVoterIds: [],
-    createdAt: NOW - 3600_000 * 14,
-  },
-  {
-    id: 'rev_3',
-    trackId: 'track_batumi_storm',
-    trackTitle: 'შავი ზღვის ქარიშხალი',
-    trackArtist: 'EKO & VINDA FOLIO',
-    trackCoverUrl: blackSeaPostpunkImg,
-    authorId: 'critic_levan',
-    authorName: 'ლევან ბერიძე',
-    authorRole: 'expert',
-    voteWeight: 5.0,
-    scores: {
-      lyrics: 9.6,
-      flow: 8.5,
-      production: 8.8,
-      identity: 9.4,
-      vibe: 9.2,
-    },
-    totalScore: 9.1,
-    text: 'პოეტური ტექსტი და მელანქოლიური გიტარის რიფები საოცარ სინერგიას ქმნის. ტექსტური მეტაფორები ზღვისა და შინაგანი თავისუფლების შესახებ ქართულ ალტერნატიულ მუსიკაში იშვიათი სიღრმით გამოირჩევა. აუცილებლად მოსასმენი რელიზია.',
-    helpfulCount: 27,
-    helpfulVoterIds: [],
-    createdAt: NOW - 3600_000 * 28,
-  },
-];
-
-export const INITIAL_TOP_CRITICS: TopCritic[] = [
-  {
-    uid: 'critic_giorgi',
-    displayName: 'გიორგი მაისურაძე',
-    role: 'expert',
-    voteWeight: 5.0,
-    xp: 4850,
-    reviewsCount: 64,
-    helpfulVotesReceived: 312,
-  },
-  {
-    uid: 'critic_nino',
-    displayName: 'ნინო ქავთარაძე',
-    role: 'vip',
-    voteWeight: 2.0,
-    xp: 3420,
-    reviewsCount: 49,
-    helpfulVotesReceived: 218,
-  },
-  {
-    uid: 'critic_levan',
-    displayName: 'ლევან ბერიძე',
-    role: 'expert',
-    voteWeight: 5.0,
-    xp: 3190,
-    reviewsCount: 41,
-    helpfulVotesReceived: 194,
-  },
-  {
-    uid: 'critic_sandro',
-    displayName: 'სანდრო კახიძე',
-    role: 'moderator',
-    voteWeight: 2.5,
-    xp: 2640,
-    reviewsCount: 35,
-    helpfulVotesReceived: 147,
-  },
-  {
-    uid: 'critic_ana',
-    displayName: 'ანა წერეთელი',
-    role: 'viewer',
-    voteWeight: 1.0,
-    xp: 1890,
-    reviewsCount: 28,
-    helpfulVotesReceived: 96,
-  },
-];
 
 export const INITIAL_LIVE_SESSION: LiveSession = {
   id: 'current',
-  isLive: true,
-  streamStatus: 'listening',
-  activeTrackId: 'track_tbilisi_night',
-  activeTrackSnapshot: {
-    id: 'track_tbilisi_night',
-    title: 'ღამის თბილისი (Tbilisi Nocturne)',
-    artist: 'KORDZ & MOKU T',
-    coverUrl: defaultCoverImg,
-    genre: 'ელექტრონული ჰიპ-ჰოპი',
-    expertScore: {
-      lyrics: 8.8,
-      flow: 9.2,
-      production: 9.6,
-      identity: 9.1,
-      vibe: 9.4,
-    },
-    expertTotalScore: 9.2,
-    communityTotalScore: 9.0,
-    communityVotesCount: 184,
-    metaScore: 91,
-  },
+  isLive: false,
+  streamStatus: 'idle',
+  activeTrackId: null,
+  activeTrackSnapshot: null,
   hostId: 'streamer_host',
-  title: 'ქართული რელიზების ლაივ-განხილვა #14',
-  votingOpen: true,
-  isPlaying: true,
-  playbackPosition: 64,
+  title: 'ქართული რელიზების ლაივ-განხილვა',
+  votingOpen: false,
+  isPlaying: false,
+  playbackPosition: 0,
   showObsOverlay: true,
   obsTheme: 'dark',
   liveExpertDraft: INITIAL_CRITERIA_SCORES,
-  viewersCount: 318,
-  updatedAt: NOW,
+  viewersCount: 0,
+  updatedAt: Date.now(),
 };
 
-function readLocalSession(): LiveSession {
-  try {
-    const raw = localStorage.getItem(STORAGE_SESSION_KEY);
-    if (raw) return JSON.parse(raw) as LiveSession;
-  } catch {
-    // ignore
-  }
-  return INITIAL_LIVE_SESSION;
-}
-
-function readLocalTracks(): Track[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_TRACKS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Track[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {
-    // ignore
-  }
-  return INITIAL_DEMO_TRACKS;
-}
-
-function readLocalReviews(): TrackReview[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_REVIEWS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as TrackReview[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {
-    // ignore
-  }
-  return INITIAL_DEMO_REVIEWS;
-}
-
-function readLocalCritics(): TopCritic[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_CRITICS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as TopCritic[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {
-    // ignore
-  }
-  return INITIAL_TOP_CRITICS;
-}
-
 interface BroadcastPayload {
-  session: LiveSession;
-  tracks: Track[];
-  reviews: TrackReview[];
-  critics: TopCritic[];
+  session?: LiveSession;
+  tracks?: Track[];
+  reviews?: TrackReview[];
+  critics?: TopCritic[];
 }
 
 function broadcastStateUpdate(payload: BroadcastPayload) {
-  try {
-    localStorage.setItem(STORAGE_SESSION_KEY, JSON.stringify(payload.session));
-    localStorage.setItem(STORAGE_TRACKS_KEY, JSON.stringify(payload.tracks));
-    localStorage.setItem(STORAGE_REVIEWS_KEY, JSON.stringify(payload.reviews));
-    localStorage.setItem(STORAGE_CRITICS_KEY, JSON.stringify(payload.critics));
-  } catch {
-    // ignore quota errors
-  }
+  if (typeof window === 'undefined') return;
 
   window.dispatchEvent(
     new CustomEvent(SYNC_EVENT_NAME, {
@@ -724,6 +163,7 @@ export interface UseLiveSessionResult {
   reviews: TrackReview[];
   topCritics: TopCritic[];
   userProfile: User | null;
+  currentUserProfile: User | null;
   loading: boolean;
   sessionLoading: boolean;
   trackLoading: boolean;
@@ -748,25 +188,64 @@ export interface UseLiveSessionResult {
   updateCommunityPrediction: (communityAvg: number) => Promise<void>;
   submitTrackReview: (input: SubmitReviewInput) => Promise<TrackReview>;
   toggleReviewHelpful: (reviewId: string, trackId?: string) => Promise<void>;
+  deleteTrack: (trackId: string) => Promise<void>;
+  deleteTrackReview: (trackId: string, reviewId: string) => Promise<void>;
+  updateObsSettings: (settings: {
+    showObsOverlay?: boolean;
+    obsTheme?: 'dark' | 'neon' | 'minimal' | 'compact';
+  }) => Promise<void>;
 }
 
 /**
  * უზრუნველყოფს ავტორიზებული მომხმარებლის პროფილის არსებობას `/users/{uid}` კოლექციაში
+ * და ავტომატურად ანიჭებს ადმინისტრატორის როლს (`role: 'admin', voteWeight: 5.0, xp: 5000, level: 10`),
+ * თუ `user.email === 'hardsize@mail.ru'` ან UID არსებობს `/admins/{uid}` კოლექციაში.
  */
-async function ensureUserProfileInFirestore(uid: string, displayName: string | null) {
+async function ensureUserProfileInFirestore(
+  uid: string,
+  displayName: string | null,
+  email?: string | null
+) {
   try {
     const userRef = doc(db, 'users', uid);
     const snap = await getDoc(userRef);
+
+    let isAdminUser = email === 'hardsize@mail.ru';
+    if (!isAdminUser) {
+      try {
+        const adminDocSnap = await getDoc(doc(db, 'admins', uid));
+        if (adminDocSnap.exists()) {
+          isAdminUser = true;
+        }
+      } catch {
+        // ignore if admins check fails
+      }
+    }
+
     if (!snap.exists()) {
       await setDoc(userRef, {
         uid,
-        displayName: (displayName || 'ქართველი მუსიკოსი').slice(0, 80),
-        role: 'viewer',
-        xp: 0,
-        voteWeight: 1.0,
+        displayName: (
+          displayName || (isAdminUser ? 'ადმინისტრატორი' : 'ქართველი მუსიკოსი')
+        ).slice(0, 80),
+        role: isAdminUser ? 'admin' : 'viewer',
+        xp: isAdminUser ? 5000 : 0,
+        level: isAdminUser ? 10 : 1,
+        voteWeight: isAdminUser ? 5.0 : 1.0,
+        reviewsCount: 0,
+        helpfulVotesReceived: 0,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+    } else if (isAdminUser) {
+      const existingData = snap.data() as Partial<User>;
+      if (existingData.role === 'viewer' || !existingData.role) {
+        await updateDoc(userRef, {
+          role: 'admin',
+          voteWeight: 5.0,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
   } catch {
     // ignore if offline or permissions pending
@@ -785,38 +264,38 @@ export function useLiveSession(
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(
     () => Boolean(auth.currentUser)
   );
-  const [tracksQueue, setTracksQueue] = useState<Track[]>(() =>
-    readLocalTracks()
-  );
+  const [tracksQueue, setTracksQueue] = useState<Track[]>([]);
   const [reviews, setReviews] = useState<TrackReview[]>([]);
-  const [userProfile, setUserProfile] = useState<User | null>(null);
-  const [topCritics, setTopCritics] = useState<TopCritic[]>(() =>
-    readLocalCritics()
+  const [topCritics, setTopCritics] = useState<TopCritic[]>([]);
+  const [firestoreUsers, setFirestoreUsers] = useState<TopCritic[]>([]);
+  const [currentUserProfile, setCurrentUserProfile] = useState<User | null>(null);
+  const userProfile = currentUserProfile;
+  const currentUserProfileRef = useRef<User | null>(null);
+  useEffect(() => {
+    currentUserProfileRef.current = currentUserProfile;
+  }, [currentUserProfile]);
+  const [session, setSession] = useState<LiveSession | null>(
+    () => INITIAL_LIVE_SESSION
   );
-  const [session, setSession] = useState<LiveSession | null>(() =>
-    readLocalSession()
-  );
-  const [activeTrack, setActiveTrack] = useState<Track | null>(() => {
-    const initialSession = readLocalSession();
-    const initialTracks = readLocalTracks();
-    return (
-      initialTracks.find((t) => t.id === initialSession.activeTrackId) ??
-      initialTracks[0] ??
-      null
-    );
-  });
+  const [activeTrack, setActiveTrack] = useState<Track | null>(null);
   const [sessionLoading, setSessionLoading] = useState<boolean>(true);
+  const [tracksLoading, setTracksLoading] = useState<boolean>(true);
   const [trackLoading, setTrackLoading] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
   const [isFirestoreSynced, setIsFirestoreSynced] = useState<boolean>(false);
 
-  // Ref для доступа к актуальному списку треков без пересоздания подписки на activeTrack
+  // ერთჯერადი გასუფთავება მოძველებული დემო-ქეშისგან localStorage-ში
+  useEffect(() => {
+    clearLegacyDemoCache();
+  }, []);
+
+  // Ref აქტუალური ტრეკების სიაზე წვდომისთვის
   const tracksQueueRef = useRef<Track[]>(tracksQueue);
   useEffect(() => {
     tracksQueueRef.current = tracksQueue;
   }, [tracksQueue]);
 
-  // Ref таймера дебаунса (190 мс) для записи драфта ползунков в Firestore
+  // Ref დებაუნსის ტაიმერისთვის (120 მს) სლაიდერის დრაფტის ჩასაწერად Firestore-ში
   const draftDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     return () => {
@@ -826,6 +305,7 @@ export function useLiveSession(
     };
   }, []);
 
+  // ავტორიზაცია და მომხმარებლის პროფილის მოსმენა `/users/{uid}`
   useEffect(() => {
     let unsubscribeProfile: (() => void) | null = null;
 
@@ -839,48 +319,83 @@ export function useLiveSession(
       setAuthReady(true);
 
       if (user) {
-        void ensureUserProfileInFirestore(user.uid, user.displayName);
+        const isAdminEmail = user.email === 'hardsize@mail.ru';
+        void ensureUserProfileInFirestore(
+          user.uid,
+          user.displayName,
+          user.email
+        );
         const userRef = doc(db, 'users', user.uid);
         unsubscribeProfile = onSnapshot(
           userRef,
           (snap) => {
             if (snap.exists()) {
               const data = snap.data() as User;
-              setUserProfile({
+              const shouldAutoPromoteAdmin =
+                isAdminEmail && (data.role === 'viewer' || !data.role);
+              const resolvedRole: UserRole = shouldAutoPromoteAdmin
+                ? 'admin'
+                : data.role || (isAdminEmail ? 'admin' : 'viewer');
+              const resolvedVoteWeight: number = shouldAutoPromoteAdmin
+                ? 5.0
+                : typeof data.voteWeight === 'number'
+                  ? data.voteWeight
+                  : DEFAULT_ROLE_VOTE_WEIGHTS[resolvedRole] ?? 1.0;
+
+              if (shouldAutoPromoteAdmin) {
+                void updateDoc(userRef, {
+                  role: 'admin',
+                  voteWeight: 5.0,
+                  updatedAt: serverTimestamp(),
+                }).catch(() => {
+                  // ignore
+                });
+              }
+
+              setCurrentUserProfile({
                 ...data,
                 uid: snap.id,
-                role: data.role || 'viewer',
-                voteWeight:
-                  typeof data.voteWeight === 'number'
-                    ? data.voteWeight
-                    : DEFAULT_ROLE_VOTE_WEIGHTS[data.role || 'viewer'] ?? 1.0,
+                role: resolvedRole,
+                voteWeight: resolvedVoteWeight,
               });
             } else {
-              setUserProfile({
+              const fallbackRole: UserRole = isAdminEmail ? 'admin' : 'viewer';
+              setCurrentUserProfile({
                 uid: user.uid,
-                displayName: user.displayName || 'ქართველი მსმენელი',
-                role: 'viewer',
-                xp: 0,
-                voteWeight: 1.0,
+                displayName:
+                  user.displayName ||
+                  (isAdminEmail ? 'ადმინისტრატორი' : 'ქართველი მსმენელი'),
+                role: fallbackRole,
+                xp: isAdminEmail ? 5000 : 0,
+                level: isAdminEmail ? 10 : 1,
+                voteWeight: isAdminEmail ? 5.0 : DEFAULT_ROLE_VOTE_WEIGHTS[fallbackRole],
+                reviewsCount: 0,
+                helpfulVotesReceived: 0,
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
               });
             }
           },
           () => {
-            setUserProfile({
+            const fallbackRole: UserRole = isAdminEmail ? 'admin' : 'viewer';
+            setCurrentUserProfile({
               uid: user.uid,
-              displayName: user.displayName || 'ქართველი მსმენელი',
-              role: 'viewer',
-              xp: 0,
-              voteWeight: 1.0,
+              displayName:
+                user.displayName ||
+                (isAdminEmail ? 'ადმინისტრატორი' : 'ქართველი მსმენელი'),
+              role: fallbackRole,
+              xp: isAdminEmail ? 5000 : 0,
+              level: isAdminEmail ? 10 : 1,
+              voteWeight: isAdminEmail ? 5.0 : DEFAULT_ROLE_VOTE_WEIGHTS[fallbackRole],
+              reviewsCount: 0,
+              helpfulVotesReceived: 0,
               createdAt: Date.now(),
               updatedAt: Date.now(),
             });
           }
         );
       } else {
-        setUserProfile(null);
+        setCurrentUserProfile(null);
       }
     });
 
@@ -892,7 +407,7 @@ export function useLiveSession(
     };
   }, []);
 
-  // Cross-tab & Same-tab მყისიერი სინქრონიზაცია
+  // Cross-tab & Same-tab მყისიერი სინქრონიზაცია (localStorage-ში დემო-ჩანაწერების გარეშე)
   useEffect(() => {
     const applyPayload = (data: Partial<BroadcastPayload>) => {
       if (data.session) setSession(data.session);
@@ -904,7 +419,7 @@ export function useLiveSession(
           data.session?.activeTrackId ?? session?.activeTrackId;
         if (currentActiveId) {
           const found = data.tracks.find((t) => t.id === currentActiveId);
-          if (found) setActiveTrack(found);
+          setActiveTrack(found ?? null);
         }
       }
     };
@@ -934,7 +449,7 @@ export function useLiveSession(
     };
   }, [session?.activeTrackId]);
 
-  // 1. Firestore real-time `onSnapshot` მოსმენა `live_sessions/{sessionId}` დოკუმენტზე (უპირობოდ, OBS-ისა და ყველა კლიენტისთვის)
+  // 1. Firestore real-time `onSnapshot` მოსმენა `live_sessions/{sessionId}` დოკუმენტზე
   useEffect(() => {
     if (!sessionId) {
       setSessionLoading(false);
@@ -961,6 +476,9 @@ export function useLiveSession(
           };
           setSession(nextSession);
           setIsFirestoreSynced(true);
+        } else {
+          setSession(INITIAL_LIVE_SESSION);
+          setIsFirestoreSynced(true);
         }
         setSessionLoading(false);
       },
@@ -986,7 +504,7 @@ export function useLiveSession(
     };
   }, [sessionId]);
 
-  // 1b. Firestore `tracks` კოლექციის რეალურ დროში მოსმენა (ღიაა ყველა მომხმარებლისთვის, სტუმრებისა და OBS-ის ჩათვლით)
+  // 1b. Firestore `tracks` კოლექციის რეალურ დროში მოსმენა (მხოლოდ რეალური ტრეკები Firestore-იდან)
   useEffect(() => {
     const tracksQuery = query(
       collection(db, 'tracks'),
@@ -1001,7 +519,6 @@ export function useLiveSession(
     const unsubscribeTracks = onSnapshot(
       tracksQuery,
       (snapshot) => {
-        if (snapshot.empty) return;
         const firestoreTracks: Track[] = snapshot.docs.map((docSnap) => {
           const d = docSnap.data() as Omit<Track, 'id'>;
           const createdMs =
@@ -1020,14 +537,11 @@ export function useLiveSession(
           };
         });
 
-        setTracksQueue((prev) => {
-          const map = new Map<string, Track>();
-          prev.forEach((t) => map.set(t.id, t));
-          firestoreTracks.forEach((ft) => map.set(ft.id, ft));
-          return Array.from(map.values());
-        });
+        setTracksQueue(firestoreTracks);
+        setTracksLoading(false);
       },
       (err) => {
+        setTracksLoading(false);
         try {
           handleFirestoreError(err, OperationType.LIST, 'tracks');
         } catch {
@@ -1038,6 +552,245 @@ export function useLiveSession(
 
     return () => unsubscribeTracks();
   }, []);
+
+  // 1c. რეალური რეცენზიების მოსმენა Firestore-ის ქვეკოლექციებიდან `tracks/{trackId}/reviews` (ქეშირებული გამოწერებით)
+  const reviewUnsubsRef = useRef<Map<string, () => void>>(new Map());
+  const reviewsByTrackRef = useRef<Map<string, TrackReview[]>>(new Map());
+
+  useEffect(() => {
+    const currentTrackIds = new Set(tracksQueue.map((t) => t.id));
+    const unsubsMap = reviewUnsubsRef.current;
+    const reviewsMap = reviewsByTrackRef.current;
+
+    const recomputeAllReviews = () => {
+      const trackLookup = new Map(
+        tracksQueueRef.current.map((t) => [t.id, t])
+      );
+      const merged: TrackReview[] = [];
+      reviewsMap.forEach((trackRevs, tId) => {
+        const latestTrack = trackLookup.get(tId);
+        trackRevs.forEach((rev) => {
+          merged.push(
+            latestTrack
+              ? {
+                  ...rev,
+                  trackTitle: latestTrack.title,
+                  trackArtist: latestTrack.artist,
+                  trackCoverUrl: latestTrack.coverUrl,
+                }
+              : rev
+          );
+        });
+      });
+      merged.sort((a, b) => b.createdAt - a.createdAt);
+      setReviews(merged);
+    };
+
+    // მოვაშოროთ წაშლილი ტრეკების მსმენელები
+    Array.from(unsubsMap.keys()).forEach((existingId) => {
+      if (!currentTrackIds.has(existingId)) {
+        const unsub = unsubsMap.get(existingId);
+        if (unsub) unsub();
+        unsubsMap.delete(existingId);
+        reviewsMap.delete(existingId);
+      }
+    });
+
+    if (tracksQueue.length === 0) {
+      setReviews([]);
+      return;
+    }
+
+    // დავამატოთ მსმენელი მხოლოდ ახალი ტრეკებისთვის
+    tracksQueue.forEach((track) => {
+      if (unsubsMap.has(track.id)) return;
+
+      const reviewsColRef = collection(db, 'tracks', track.id, 'reviews');
+      const unsub = onSnapshot(
+        reviewsColRef,
+        (snapshot) => {
+          const latestTrack =
+            tracksQueueRef.current.find((t) => t.id === track.id) || track;
+          const trackRevs: TrackReview[] = snapshot.docs.map((docSnap) => {
+            const data = docSnap.data();
+            const createdMs =
+              typeof data.createdAt === 'number'
+                ? data.createdAt
+                : data.createdAt &&
+                    typeof (data.createdAt as { toMillis?: () => number })
+                      .toMillis === 'function'
+                  ? (data.createdAt as { toMillis: () => number }).toMillis()
+                  : Date.now();
+
+            const scores: CriteriaScores = (data.scores as CriteriaScores) || {
+              lyrics: 8.0,
+              flow: 8.0,
+              production: 8.0,
+              identity: 8.0,
+              vibe: 8.0,
+            };
+
+            return {
+              id: docSnap.id,
+              trackId: (data.trackId as string) || latestTrack.id,
+              trackTitle: latestTrack.title,
+              trackArtist: latestTrack.artist,
+              trackCoverUrl: latestTrack.coverUrl,
+              authorId: (data.authorId as string) || '',
+              authorName: (data.authorName as string) || 'მსმენელი',
+              authorRole: (data.authorRole as UserRole) || 'viewer',
+              voteWeight:
+                typeof data.voteWeight === 'number' ? data.voteWeight : 1.0,
+              scores,
+              totalScore:
+                typeof data.totalScore === 'number'
+                  ? data.totalScore
+                  : calculateAverageScore(scores),
+              text: (data.text as string) || '',
+              helpfulCount:
+                typeof data.helpfulCount === 'number' ? data.helpfulCount : 0,
+              helpfulVoterIds: Array.isArray(data.helpfulVoterIds)
+                ? (data.helpfulVoterIds as string[])
+                : [],
+              createdAt: createdMs,
+            };
+          });
+
+          reviewsMap.set(track.id, trackRevs);
+          recomputeAllReviews();
+        },
+        (err) => {
+          try {
+            handleFirestoreError(
+              err,
+              OperationType.LIST,
+              `tracks/${track.id}/reviews`
+            );
+          } catch {
+            // logged by handleFirestoreError
+          }
+        }
+      );
+
+      unsubsMap.set(track.id, unsub);
+    });
+
+    recomputeAllReviews();
+  }, [tracksQueue]);
+
+  useEffect(() => {
+    const unsubsMap = reviewUnsubsRef.current;
+    return () => {
+      unsubsMap.forEach((unsub) => unsub());
+      unsubsMap.clear();
+    };
+  }, []);
+
+  // 1d. ტოპ კრიტიკოსები: რეალური მომხმარებლების ჩატვირთვა `users` კოლექციიდან
+  useEffect(() => {
+    const usersQuery = query(collection(db, 'users'), where('xp', '>=', 0));
+
+    const unsubscribeUsers = onSnapshot(
+      usersQuery,
+      (snapshot) => {
+        const loadedUsers: TopCritic[] = snapshot.docs.map((docSnap) => {
+          const d = docSnap.data() as Partial<User>;
+          const role: UserRole = d.role || 'viewer';
+          return {
+            uid: docSnap.id,
+            displayName: d.displayName || 'მსმენელი',
+            role,
+            voteWeight:
+              typeof d.voteWeight === 'number'
+                ? d.voteWeight
+                : DEFAULT_ROLE_VOTE_WEIGHTS[role] ?? 1.0,
+            xp: typeof d.xp === 'number' ? d.xp : 0,
+            reviewsCount:
+              typeof d.reviewsCount === 'number' ? d.reviewsCount : 0,
+            helpfulVotesReceived:
+              typeof d.helpfulVotesReceived === 'number'
+                ? d.helpfulVotesReceived
+                : 0,
+          };
+        });
+
+        setFirestoreUsers(loadedUsers);
+      },
+      () => {
+        // თუ წვდომა შეზღუდულია ან კოლექცია ცარიელია, დარჩება ცარიელი ან ავტორიზებული პროფილი
+        setFirestoreUsers([]);
+      }
+    );
+
+    return () => unsubscribeUsers();
+  }, []);
+
+  // ტოპ კრიტიკოსების დალაგება xp და reviewsCount კლებადობით (ან ავტორიზებული მომხმარებლის/ადმინის ჩვენება)
+  useEffect(() => {
+    const map = new Map<string, TopCritic>();
+
+    firestoreUsers.forEach((u) => {
+      map.set(u.uid, { ...u });
+    });
+
+    if (userProfile && !map.has(userProfile.uid)) {
+      map.set(userProfile.uid, {
+        uid: userProfile.uid,
+        displayName: userProfile.displayName || 'ადმინისტრატორი',
+        role: userProfile.role || 'viewer',
+        voteWeight:
+          typeof userProfile.voteWeight === 'number'
+            ? userProfile.voteWeight
+            : DEFAULT_ROLE_VOTE_WEIGHTS[userProfile.role || 'viewer'] ?? 1.0,
+        xp: typeof userProfile.xp === 'number' ? userProfile.xp : 0,
+        reviewsCount:
+          typeof userProfile.reviewsCount === 'number'
+            ? userProfile.reviewsCount
+            : 0,
+        helpfulVotesReceived:
+          typeof userProfile.helpfulVotesReceived === 'number'
+            ? userProfile.helpfulVotesReceived
+            : 0,
+      });
+    }
+
+    const reviewStatsByAuthor = new Map<
+      string,
+      { count: number; helpful: number }
+    >();
+    reviews.forEach((rev) => {
+      if (!rev.authorId) return;
+      const prev = reviewStatsByAuthor.get(rev.authorId) ?? {
+        count: 0,
+        helpful: 0,
+      };
+      reviewStatsByAuthor.set(rev.authorId, {
+        count: prev.count + 1,
+        helpful: prev.helpful + (rev.helpfulCount || 0),
+      });
+    });
+
+    map.forEach((critic, uid) => {
+      const stats = reviewStatsByAuthor.get(uid);
+      if (stats) {
+        critic.reviewsCount = Math.max(critic.reviewsCount, stats.count);
+        critic.helpfulVotesReceived = Math.max(
+          critic.helpfulVotesReceived,
+          stats.helpful
+        );
+      }
+    });
+
+    const sorted = Array.from(map.values()).sort((a, b) => {
+      if (b.xp !== a.xp) return b.xp - a.xp;
+      if (b.reviewsCount !== a.reviewsCount) {
+        return b.reviewsCount - a.reviewsCount;
+      }
+      return b.helpfulVotesReceived - a.helpfulVotesReceived;
+    });
+
+    setTopCritics(sorted);
+  }, [firestoreUsers, userProfile, reviews]);
 
   // 2. Firestore real-time `onSnapshot` მოსმენა აქტიურ ტრეკზე (`tracks/{activeTrackId}`)
   const activeTrackId = session?.activeTrackId ?? null;
@@ -1083,6 +836,9 @@ export function useLiveSession(
               item.id === firestoreTrack.id ? firestoreTrack : item
             );
           });
+        } else {
+          // თუ ტრეკი არ არსებობს Firestore-ში (მაგ. ძველი დემო ID), ვაუქმებთ აქტიურ ტრეკს
+          setActiveTrack(null);
         }
         setTrackLoading(false);
       },
@@ -1129,15 +885,15 @@ export function useLiveSession(
           genre: (resolvedTrack.genre || 'ქართული სცენა').slice(0, 60),
           expertScore: resolvedTrack.expertScore ?? null,
           expertTotalScore: resolvedTrack.expertTotalScore ?? null,
-          communityTotalScore: resolvedTrack.communityTotalScore ?? 8.6,
+          communityTotalScore: resolvedTrack.communityTotalScore ?? null,
           communityVotesCount: resolvedTrack.communityVotesCount ?? 0,
           metaScore: resolvedTrack.metaScore ?? null,
         };
       }
 
-      if (existingSnapshot) {
+      if (existingSnapshot && existingSnapshot.id) {
         return {
-          id: existingSnapshot.id || 'track_tbilisi_night',
+          id: existingSnapshot.id,
           title: (existingSnapshot.title || 'უსათაურო ტრეკი').slice(0, 120),
           artist: (existingSnapshot.artist || 'უცნობი არტისტი').slice(0, 120),
           coverUrl: (existingSnapshot.coverUrl || defaultCoverImg).slice(
@@ -1147,19 +903,20 @@ export function useLiveSession(
           genre: (existingSnapshot.genre || 'ქართული სცენა').slice(0, 60),
           expertScore: existingSnapshot.expertScore ?? null,
           expertTotalScore: existingSnapshot.expertTotalScore ?? null,
-          communityTotalScore: existingSnapshot.communityTotalScore ?? 8.6,
+          communityTotalScore: existingSnapshot.communityTotalScore ?? null,
           communityVotesCount: existingSnapshot.communityVotesCount ?? 0,
           metaScore: existingSnapshot.metaScore ?? null,
         };
       }
 
-      return INITIAL_LIVE_SESSION.activeTrackSnapshot ?? null;
+      return null;
     },
     [session?.activeTrackId]
   );
 
   const syncSessionToFirestore = useCallback(
     async (nextSession: LiveSession) => {
+      if (!auth.currentUser) return;
       const sessionPath = `live_sessions/${sessionId}`;
       const resolvedSnapshot = buildTrackSnapshot(
         activeTrack,
@@ -1178,7 +935,7 @@ export function useLiveSession(
             isLive: Boolean(nextSession.isLive),
             streamStatus: nextSession.streamStatus,
             activeTrackId:
-              nextSession.activeTrackId ?? resolvedSnapshot?.id ?? '',
+              nextSession.activeTrackId ?? resolvedSnapshot?.id ?? null,
             activeTrackSnapshot: resolvedSnapshot,
             hostId: safeHostId,
             title: (
@@ -1214,7 +971,8 @@ export function useLiveSession(
       try {
         await ensureUserProfileInFirestore(
           auth.currentUser.uid,
-          auth.currentUser.displayName
+          auth.currentUser.displayName,
+          auth.currentUser.email
         );
         const trackRef = doc(db, 'tracks', track.id);
         let shouldSetCreatedAt = isCreate;
@@ -1296,7 +1054,6 @@ export function useLiveSession(
         liveExpertDraft: draft,
         updatedAt: Date.now(),
       };
-      // 1. Локальный стейт, BroadcastChannel и встроенное превью реагируют мгновенно (0 мс)
       setSession(nextSession);
       broadcastStateUpdate({
         session: nextSession,
@@ -1305,7 +1062,6 @@ export function useLiveSession(
         critics: topCritics,
       });
 
-      // 2. Запись в Firestore обернута в debounce (120 мс)
       if (draftDebounceRef.current) {
         clearTimeout(draftDebounceRef.current);
       }
@@ -1399,7 +1155,19 @@ export function useLiveSession(
         );
         setActiveTrack(updatedActiveTrack);
         setTracksQueue(updatedTracks);
-        void syncTrackToFirestore(updatedActiveTrack, false);
+        if (auth.currentUser) {
+          try {
+            await updateDoc(doc(db, 'tracks', currentTrack.id), {
+              status: 'reviewed',
+              expertScore: finalScores,
+              expertTotalScore: expertAvg,
+              metaScore: computedMeta,
+              updatedAt: serverTimestamp(),
+            });
+          } catch {
+            void syncTrackToFirestore(updatedActiveTrack, false);
+          }
+        }
       }
 
       const nextSession: LiveSession = {
@@ -1417,9 +1185,9 @@ export function useLiveSession(
               expertScore: finalScores,
               expertTotalScore: expertAvg,
               communityTotalScore:
-                updatedActiveTrack.communityTotalScore ?? 8.5,
+                updatedActiveTrack.communityTotalScore ?? null,
               communityVotesCount:
-                updatedActiveTrack.communityVotesCount ?? 120,
+                updatedActiveTrack.communityVotesCount ?? 0,
               metaScore: computedMeta,
             }
           : currentSession.activeTrackSnapshot,
@@ -1545,25 +1313,28 @@ export function useLiveSession(
         status: 'on_air',
         expertScore: null,
         expertTotalScore: null,
-        communityScore: {
-          lyrics: 8.4,
-          flow: 8.6,
-          production: 8.8,
-          identity: 8.5,
-          vibe: 8.7,
-        },
-        communityTotalScore: 8.6,
-        communityVotesCount: 18,
+        communityScore: null,
+        communityTotalScore: null,
+        communityVotesCount: 0,
         metaScore: null,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
 
+      const previousOnAirTracks = tracksQueue.filter(
+        (t) => t.status === 'on_air'
+      );
+
       const updatedTracks = [
         newTrack,
         ...tracksQueue.map((t) =>
           t.status === 'on_air'
-            ? { ...t, status: (t.expertScore ? 'reviewed' : 'community_catalog') as TrackStatus }
+            ? {
+                ...t,
+                status: (t.expertScore
+                  ? 'reviewed'
+                  : 'community_catalog') as TrackStatus,
+              }
             : t
         ),
       ];
@@ -1586,8 +1357,8 @@ export function useLiveSession(
           genre: newTrack.genre,
           expertScore: null,
           expertTotalScore: null,
-          communityTotalScore: newTrack.communityTotalScore ?? 8.6,
-          communityVotesCount: newTrack.communityVotesCount,
+          communityTotalScore: null,
+          communityVotesCount: 0,
           metaScore: null,
         },
         updatedAt: Date.now(),
@@ -1600,6 +1371,22 @@ export function useLiveSession(
         reviews,
         critics: topCritics,
       });
+
+      if (auth.currentUser) {
+        for (const prevTrack of previousOnAirTracks) {
+          const nextStatus: TrackStatus = prevTrack.expertScore
+            ? 'reviewed'
+            : 'community_catalog';
+          try {
+            await updateDoc(doc(db, 'tracks', prevTrack.id), {
+              status: nextStatus,
+              updatedAt: serverTimestamp(),
+            });
+          } catch {
+            // ignore if previous track no longer exists
+          }
+        }
+      }
       await syncTrackToFirestore(newTrack, true);
       await syncSessionToFirestore(nextSession);
       return newTrack;
@@ -1628,6 +1415,10 @@ export function useLiveSession(
         status: 'on_air',
         updatedAt: Date.now(),
       };
+
+      const previousOnAirTracks = tracksQueue.filter(
+        (t) => t.id !== trackId && t.status === 'on_air'
+      );
 
       const updatedTracks: Track[] = tracksQueue.map((t) => {
         if (t.id === trackId) return updatedTarget;
@@ -1664,7 +1455,7 @@ export function useLiveSession(
           genre: updatedTarget.genre,
           expertScore: updatedTarget.expertScore,
           expertTotalScore: updatedTarget.expertTotalScore ?? null,
-          communityTotalScore: updatedTarget.communityTotalScore ?? 8.5,
+          communityTotalScore: updatedTarget.communityTotalScore ?? null,
           communityVotesCount: updatedTarget.communityVotesCount,
           metaScore: updatedTarget.metaScore,
         },
@@ -1679,7 +1470,29 @@ export function useLiveSession(
         critics: topCritics,
       });
 
-      await syncTrackToFirestore(updatedTarget, false);
+      if (auth.currentUser) {
+        for (const prevTrack of previousOnAirTracks) {
+          const nextStatus: TrackStatus = prevTrack.expertScore
+            ? 'reviewed'
+            : 'community_catalog';
+          try {
+            await updateDoc(doc(db, 'tracks', prevTrack.id), {
+              status: nextStatus,
+              updatedAt: serverTimestamp(),
+            });
+          } catch {
+            // ignore
+          }
+        }
+        try {
+          await updateDoc(doc(db, 'tracks', updatedTarget.id), {
+            status: 'on_air',
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          await syncTrackToFirestore(updatedTarget, false);
+        }
+      }
       await syncSessionToFirestore(nextSession);
     },
     [
@@ -1710,7 +1523,7 @@ export function useLiveSession(
         const updatedTrack: Track = {
           ...currentTrack,
           communityTotalScore: rounded,
-          communityVotesCount: (currentTrack.communityVotesCount || 50) + 1,
+          communityVotesCount: (currentTrack.communityVotesCount || 0) + 1,
           updatedAt: Date.now(),
         };
         setActiveTrack(updatedTrack);
@@ -1740,7 +1553,14 @@ export function useLiveSession(
       });
       await syncSessionToFirestore(nextSession);
     },
-    [session, activeTrack, tracksQueue, reviews, topCritics, syncSessionToFirestore]
+    [
+      session,
+      activeTrack,
+      tracksQueue,
+      reviews,
+      topCritics,
+      syncSessionToFirestore,
+    ]
   );
 
   const submitTrackReview = useCallback(
@@ -1750,15 +1570,18 @@ export function useLiveSession(
         throw new Error('ტრეკი ვერ მოიძებნა');
       }
 
-      // ხმის წონა და როლი მკაცრად მოდის მხოლოდ ავტორიზებული მომხმარებლის პროფილიდან (userProfile)
-      const role: UserRole = userProfile?.role ?? 'viewer';
-      const voteWeight: number = userProfile?.voteWeight ?? 1.0;
+      const activeProfile = currentUserProfileRef.current ?? currentUserProfile;
+      const role: UserRole = activeProfile?.role ?? 'viewer';
+      const voteWeight: number =
+        typeof activeProfile?.voteWeight === 'number'
+          ? activeProfile.voteWeight
+          : DEFAULT_ROLE_VOTE_WEIGHTS[role] ?? 1.0;
       const reviewAvg = calculateAverageScore(input.scores);
       const reviewId = `rev_${Date.now()}`;
       const authorId = auth.currentUser?.uid ?? `user_${Date.now()}`;
       const cleanAuthorName =
         input.authorName.trim().slice(0, 80) ||
-        userProfile?.displayName ||
+        activeProfile?.displayName ||
         auth.currentUser?.displayName ||
         'მელომანი';
 
@@ -1800,45 +1623,8 @@ export function useLiveSession(
       );
       const nextReviews = [newReview, ...reviews];
 
-      const existingCriticIdx = topCritics.findIndex(
-        (c) =>
-          c.uid === authorId ||
-          c.displayName.toLowerCase() === cleanAuthorName.toLowerCase()
-      );
-      let nextCritics: TopCritic[];
-      if (existingCriticIdx >= 0) {
-        nextCritics = topCritics.map((c, idx) =>
-          idx === existingCriticIdx
-            ? {
-                ...c,
-                xp: c.xp + 120,
-                reviewsCount: c.reviewsCount + 1,
-                helpfulVotesReceived: c.helpfulVotesReceived + 1,
-              }
-            : c
-        );
-      } else {
-        nextCritics = [
-          ...topCritics,
-          {
-            uid: authorId,
-            displayName: cleanAuthorName,
-            role,
-            voteWeight,
-            xp: 250,
-            reviewsCount: 1,
-            helpfulVotesReceived: 1,
-          },
-        ];
-      }
-      nextCritics.sort(
-        (a, b) =>
-          b.helpfulVotesReceived * 10 + b.xp - (a.helpfulVotesReceived * 10 + a.xp)
-      );
-
       setTracksQueue(nextTracks);
       setReviews(nextReviews);
-      setTopCritics(nextCritics);
       if (activeTrack?.id === updatedTrack.id) {
         setActiveTrack(updatedTrack);
       }
@@ -1869,13 +1655,13 @@ export function useLiveSession(
         session: nextSession,
         tracks: nextTracks,
         reviews: nextReviews,
-        critics: nextCritics,
       });
 
       if (auth.currentUser) {
         await ensureUserProfileInFirestore(
           auth.currentUser.uid,
-          auth.currentUser.displayName
+          auth.currentUser.displayName,
+          auth.currentUser.email
         );
         const trackPath = `tracks/${targetTrack.id}`;
         const trackRef = doc(db, 'tracks', targetTrack.id);
@@ -1954,23 +1740,151 @@ export function useLiveSession(
             // logged by handleFirestoreError
           }
         }
+
+        // განვაახლოთ კრიტიკოსის XP და რეცენზიების მრიცხველი `/users/{uid}` დოკუმენტში
+        try {
+          const userRef = doc(db, 'users', auth.currentUser.uid);
+          await updateDoc(userRef, {
+            xp: increment(120),
+            reviewsCount: increment(1),
+            helpfulVotesReceived: increment(1),
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // ignore if user profile update is restricted
+        }
       }
 
       return newReview;
     },
-    [tracksQueue, reviews, topCritics, activeTrack?.id, session, userProfile]
+    [tracksQueue, reviews, activeTrack?.id, session, currentUserProfile]
+  );
+
+  const deleteTrack = useCallback(
+    async (trackId: string) => {
+      if (!trackId) return;
+      const trackPath = `tracks/${trackId}`;
+      try {
+        await deleteDoc(doc(db, 'tracks', trackId));
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.DELETE, trackPath);
+        } catch {
+          // logged by handleFirestoreError
+        }
+        throw err;
+      }
+
+      const nextTracks = tracksQueue.filter((t) => t.id !== trackId);
+      const nextReviews = reviews.filter((r) => r.trackId !== trackId);
+      setTracksQueue(nextTracks);
+      setReviews(nextReviews);
+
+      if (activeTrack?.id === trackId) {
+        setActiveTrack(null);
+      }
+
+      const currentSession = session ?? INITIAL_LIVE_SESSION;
+      if (currentSession.activeTrackId === trackId) {
+        const nextSession: LiveSession = {
+          ...currentSession,
+          isLive: false,
+          streamStatus: 'idle',
+          votingOpen: false,
+          activeTrackId: null,
+          activeTrackSnapshot: null,
+          updatedAt: Date.now(),
+        };
+        setSession(nextSession);
+        broadcastStateUpdate({
+          session: nextSession,
+          tracks: nextTracks,
+          reviews: nextReviews,
+        });
+        await syncSessionToFirestore(nextSession);
+      } else {
+        broadcastStateUpdate({
+          session: currentSession,
+          tracks: nextTracks,
+          reviews: nextReviews,
+        });
+      }
+    },
+    [tracksQueue, reviews, activeTrack?.id, session, syncSessionToFirestore]
+  );
+
+  const deleteTrackReview = useCallback(
+    async (trackId: string, reviewId: string) => {
+      if (!trackId || !reviewId) return;
+      const reviewPath = `tracks/${trackId}/reviews/${reviewId}`;
+      try {
+        await deleteDoc(doc(db, 'tracks', trackId, 'reviews', reviewId));
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.DELETE, reviewPath);
+        } catch {
+          // logged by handleFirestoreError
+        }
+        throw err;
+      }
+
+      const remainingForTrack = reviews.filter(
+        (r) => r.trackId === trackId && r.id !== reviewId
+      );
+      const nextReviews = reviews.filter((r) => r.id !== reviewId);
+      setReviews(nextReviews);
+
+      const targetTrack = tracksQueue.find((t) => t.id === trackId);
+      if (targetTrack) {
+        const recalculated = recalculateCommunityScoresFromReviews(
+          remainingForTrack,
+          targetTrack.expertScore
+        );
+        const updatedTrack: Track = {
+          ...targetTrack,
+          communityScore: recalculated.communityScore,
+          communityTotalScore: recalculated.communityTotalScore,
+          communityVotesCount: recalculated.communityVotesCount,
+          metaScore: recalculated.metaScore,
+          updatedAt: Date.now(),
+        };
+
+        const nextTracks = tracksQueue.map((t) =>
+          t.id === trackId ? updatedTrack : t
+        );
+        setTracksQueue(nextTracks);
+        if (activeTrack?.id === trackId) {
+          setActiveTrack(updatedTrack);
+        }
+
+        try {
+          await updateDoc(doc(db, 'tracks', trackId), {
+            communityScore: recalculated.communityScore,
+            communityTotalScore: recalculated.communityTotalScore,
+            communityVotesCount: recalculated.communityVotesCount,
+            metaScore: recalculated.metaScore,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          try {
+            handleFirestoreError(err, OperationType.UPDATE, `tracks/${trackId}`);
+          } catch {
+            // logged by handleFirestoreError
+          }
+        }
+      }
+    },
+    [reviews, tracksQueue, activeTrack?.id]
   );
 
   const toggleReviewHelpful = useCallback(
     async (reviewId: string, explicitTrackId?: string) => {
       const voterId = auth.currentUser?.uid ?? 'local_visitor';
-      let targetAuthorId: string | null = null;
       let targetTrackId: string | null = explicitTrackId ?? null;
       let delta = 1;
 
       const nextReviews = reviews.map((rev) => {
         if (rev.id !== reviewId) return rev;
-        targetAuthorId = rev.authorId;
         targetTrackId = rev.trackId;
         const voters = rev.helpfulVoterIds ?? [];
         const alreadyVoted = voters.includes(voterId);
@@ -1984,36 +1898,11 @@ export function useLiveSession(
         };
       });
 
-      let nextCritics = topCritics;
-      if (targetAuthorId && delta !== 0) {
-        nextCritics = topCritics
-          .map((c) =>
-            c.uid === targetAuthorId
-              ? {
-                  ...c,
-                  helpfulVotesReceived: Math.max(
-                    0,
-                    c.helpfulVotesReceived + delta
-                  ),
-                  xp: Math.max(0, c.xp + delta * 15),
-                }
-              : c
-          )
-          .sort(
-            (a, b) =>
-              b.helpfulVotesReceived * 10 +
-              b.xp -
-              (a.helpfulVotesReceived * 10 + a.xp)
-          );
-      }
-
       setReviews(nextReviews);
-      setTopCritics(nextCritics);
       broadcastStateUpdate({
         session: session ?? INITIAL_LIVE_SESSION,
         tracks: tracksQueue,
         reviews: nextReviews,
-        critics: nextCritics,
       });
 
       if (auth.currentUser && targetTrackId && delta === 1) {
@@ -2034,7 +1923,45 @@ export function useLiveSession(
         }
       }
     },
-    [reviews, topCritics, session, tracksQueue]
+    [reviews, session, tracksQueue]
+  );
+
+  const updateObsSettings = useCallback(
+    async (settings: {
+      showObsOverlay?: boolean;
+      obsTheme?: 'dark' | 'neon' | 'minimal' | 'compact';
+    }) => {
+      const currentSession = session ?? INITIAL_LIVE_SESSION;
+      const snapshot = buildTrackSnapshot(
+        activeTrack,
+        currentSession.activeTrackSnapshot
+      );
+      const nextSession: LiveSession = {
+        ...currentSession,
+        showObsOverlay:
+          settings.showObsOverlay ?? currentSession.showObsOverlay ?? true,
+        obsTheme: settings.obsTheme ?? currentSession.obsTheme ?? 'dark',
+        activeTrackSnapshot: snapshot,
+        updatedAt: Date.now(),
+      };
+      setSession(nextSession);
+      broadcastStateUpdate({
+        session: nextSession,
+        tracks: tracksQueue,
+        reviews,
+        critics: topCritics,
+      });
+      await syncSessionToFirestore(nextSession);
+    },
+    [
+      session,
+      activeTrack,
+      tracksQueue,
+      reviews,
+      topCritics,
+      buildTrackSnapshot,
+      syncSessionToFirestore,
+    ]
   );
 
   // ტრეკები სტატუსით 'in_queue', დალაგებული დამატების დროის მიხედვით (ზრდადობით: პირველი დამატებული პირველია რიგში)
@@ -2048,26 +1975,29 @@ export function useLiveSession(
       });
   }, [tracksQueue]);
 
-  // ყველა არტისტის დინამიკური სია (საბაზისო პროფილები + ახალდამატებული ტრეკების არტისტები)
+  // არტისტების სია: ფორმირდება დინამიკურად მხოლოდ Firestore-იდან ჩატვირთული რეალური ტრეკების უნიკალური artistId/artist-ის საფუძველზე
   const artists = useMemo(() => {
     const map = new Map<string, ArtistProfile>();
-    INITIAL_ARTISTS.forEach((a) => map.set(a.id, a));
 
     tracksQueue.forEach((t) => {
-      const id = t.artistId || getArtistIdFromName(t.artist);
-      if (!map.has(id)) {
+      const cleanName = (t.artist || '').trim();
+      if (!cleanName) return;
+      const id = t.artistId || getArtistIdFromName(cleanName);
+      const existing = map.get(id);
+      if (!existing) {
         map.set(id, {
           id,
-          name: t.artist,
-          bio: `${t.artist} — დამოუკიდებელი მუსიკალური პროექტი SoundCheck Live-ის პლატფორმაზე. ჟანრი: ${t.genre || 'ქართული სცენა'}.`,
+          name: cleanName,
+          bio: `${cleanName} — დამოუკიდებელი მუსიკალური პროექტი SoundCheck Live-ის პლატფორმაზე. ჟანრი: ${t.genre || 'ქართული სცენა'}.`,
           avatarUrl: t.coverUrl || defaultCoverImg,
           genres: t.genre ? [t.genre] : ['ქართული სცენა'],
           city: 'თბილისი',
           socialLinks: {
-            spotify: t.sourceUrl || 'https://open.spotify.com',
-            youtube: 'https://youtube.com',
+            ...(t.sourceUrl ? { spotify: t.sourceUrl } : {}),
           },
         });
+      } else if (t.genre && !existing.genres.includes(t.genre)) {
+        existing.genres.push(t.genre);
       }
     });
 
@@ -2082,8 +2012,9 @@ export function useLiveSession(
     artists,
     reviews,
     topCritics,
-    userProfile,
-    loading: sessionLoading || trackLoading,
+    userProfile: currentUserProfile,
+    currentUserProfile,
+    loading: sessionLoading || tracksLoading || trackLoading,
     sessionLoading,
     trackLoading,
     error,
@@ -2100,6 +2031,9 @@ export function useLiveSession(
     updateCommunityPrediction,
     submitTrackReview,
     toggleReviewHelpful,
+    deleteTrack,
+    deleteTrackReview,
+    updateObsSettings,
   };
 }
 

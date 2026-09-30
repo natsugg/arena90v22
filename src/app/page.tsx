@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ArrowUpRight,
   Plus,
+  Lock,
   User as UserIcon,
 } from 'lucide-react';
 import { i18n } from '../lib/i18n';
@@ -17,6 +18,7 @@ import { useLiveSession, PRESET_COVERS } from '../hooks/useLiveSession';
 import {
   calculateAverageScore,
   calculateFairTrackRating,
+  canUserPublishTrack,
   getArtistIdFromName,
   CRITERIA_KEYS,
   type Track,
@@ -45,8 +47,14 @@ export default function HomePage({
     artists,
     reviews,
     topCritics,
+    userProfile,
+    currentUserProfile,
+    loading,
     toggleReviewHelpful,
   } = useLiveSession('current');
+
+  const activeUserProfile = currentUserProfile ?? userProfile;
+  const canPublishTrack = canUserPublishTrack(activeUserProfile?.role);
 
   const [activeTab, setActiveTab] = useState<LeaderboardTab>('all_time');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -167,6 +175,10 @@ export default function HomePage({
                 src={activeTrack?.coverUrl || PRESET_COVERS.vinyl}
                 alt={activeTrack?.title}
                 referrerPolicy="no-referrer"
+                onError={(e) => {
+                  e.currentTarget.onerror = null;
+                  e.currentTarget.src = PRESET_COVERS.vinyl;
+                }}
                 className="w-16 h-16 rounded-xl object-cover bg-zinc-900 border border-zinc-800 shrink-0"
               />
               <div className="min-w-0 space-y-1">
@@ -251,7 +263,7 @@ export default function HomePage({
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {onOpenSubmitModal && (
+            {onOpenSubmitModal && canPublishTrack ? (
               <button
                 type="button"
                 onClick={onOpenSubmitModal}
@@ -260,6 +272,14 @@ export default function HomePage({
                 <Plus className="w-4 h-4" />
                 <span>{i18n.phrases.submitTrack}</span>
               </button>
+            ) : (
+              <span
+                title={`${i18n.phrases.accessRestricted} — ${i18n.phrases.expertsOnly}`}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-500 bg-[#111723] border border-zinc-800/80 rounded-xl select-none whitespace-nowrap"
+              >
+                <Lock className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <span>{i18n.phrases.expertsOnly}</span>
+              </span>
             )}
 
             {/* ლიდერბორდის 3 ჩანართი */}
@@ -353,109 +373,165 @@ export default function HomePage({
         {/* მარცხენა 8 სვეტი */}
         <div className="lg:col-span-8">
           {activeTab === 'recent_reviews' ? (
-            <div className="space-y-4">
-              {reviews.map((rev) => {
-                const isHelpfulVoted = (rev.helpfulVoterIds ?? []).includes(
-                  currentVoterId
-                );
+            reviews.length === 0 ? (
+              <div className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-10 text-center text-sm text-zinc-400">
+                რეცენზიები ჯერ არ დაწერილა
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {reviews.map((rev) => {
+                  const isHelpfulVoted = (rev.helpfulVoterIds ?? []).includes(
+                    currentVoterId
+                  );
 
-                return (
-                  <article
-                    key={rev.id}
-                    className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-6 space-y-4"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-zinc-800/80">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenTrack(rev.trackId)}
-                        className="flex items-center gap-3 text-left group cursor-pointer min-w-0"
-                      >
-                        <img
-                          src={rev.trackCoverUrl || PRESET_COVERS.vinyl}
-                          alt={rev.trackTitle}
-                          referrerPolicy="no-referrer"
-                          className="w-12 h-12 rounded-lg object-cover bg-zinc-900 border border-zinc-800 shrink-0"
-                        />
-                        <div className="min-w-0">
-                          <p className="text-sm font-bold text-zinc-100 group-hover:text-amber-400 transition-colors truncate">
-                            {rev.trackTitle}
-                          </p>
-                          <p className="text-xs text-zinc-400 truncate">
-                            {rev.trackArtist}
-                          </p>
-                        </div>
-                      </button>
+                  return (
+                    <article
+                      key={rev.id}
+                      className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-6 space-y-4"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-zinc-800/80">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenTrack(rev.trackId)}
+                          className="flex items-center gap-3 text-left group cursor-pointer min-w-0"
+                        >
+                          <img
+                            src={rev.trackCoverUrl || PRESET_COVERS.vinyl}
+                            alt={rev.trackTitle}
+                            referrerPolicy="no-referrer"
+                            onError={(e) => {
+                              e.currentTarget.onerror = null;
+                              e.currentTarget.src = PRESET_COVERS.vinyl;
+                            }}
+                            className="w-12 h-12 rounded-lg object-cover bg-zinc-900 border border-zinc-800 shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-zinc-100 group-hover:text-amber-400 transition-colors truncate">
+                              {rev.trackTitle}
+                            </p>
+                            <p className="text-xs text-zinc-400 truncate">
+                              {rev.trackArtist}
+                            </p>
+                          </div>
+                        </button>
 
-                      <div className="text-right shrink-0">
-                        <span className="text-2xl font-extrabold font-mono-tabular text-amber-400">
-                          {rev.totalScore.toFixed(1)}
-                        </span>
-                        <span className="text-xs font-mono-tabular text-zinc-500 ml-1">
-                          /10
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
-                      <div>
-                        <strong className="text-zinc-200 font-semibold">
-                          {rev.authorName}
-                        </strong>
-                        <span className="mx-1.5" aria-hidden="true">
-                          ·
-                        </span>
-                        <span>{i18n.roles[rev.authorRole]}</span>
-                        <span className="mx-1.5" aria-hidden="true">
-                          ·
-                        </span>
-                        <span className="font-mono-tabular">
-                          {i18n.portal.voteWeightBadge} ×
-                          {rev.voteWeight.toFixed(1)}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2 font-mono-tabular text-zinc-400">
-                        {CRITERIA_KEYS.map((k) => (
-                          <span key={k}>
-                            {i18n.criteriaShort[k]} {rev.scores[k].toFixed(1)}
+                        <div className="text-right shrink-0">
+                          <span className="text-2xl font-extrabold font-mono-tabular text-amber-400">
+                            {rev.totalScore.toFixed(1)}
                           </span>
-                        ))}
+                          <span className="text-xs font-mono-tabular text-zinc-500 ml-1">
+                            /10
+                          </span>
+                        </div>
                       </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
+                        <div>
+                          <strong className="text-zinc-200 font-semibold">
+                            {rev.authorName}
+                          </strong>
+                          <span className="mx-1.5" aria-hidden="true">
+                            ·
+                          </span>
+                          <span>{i18n.roles[rev.authorRole]}</span>
+                          <span className="mx-1.5" aria-hidden="true">
+                            ·
+                          </span>
+                          <span className="font-mono-tabular">
+                            {i18n.portal.voteWeightBadge} ×
+                            {rev.voteWeight.toFixed(1)}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 font-mono-tabular text-zinc-400">
+                          {CRITERIA_KEYS.map((k) => (
+                            <span key={k}>
+                              {i18n.criteriaShort[k]} {rev.scores[k].toFixed(1)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <p className="text-sm text-zinc-200 leading-relaxed break-words break-all [overflow-wrap:anywhere] whitespace-pre-wrap">
+                        {rev.text}
+                      </p>
+
+                      <div className="flex items-center justify-between pt-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenTrack(rev.trackId)}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-amber-400 hover:text-amber-300 cursor-pointer"
+                        >
+                          <span>{i18n.portal.openTrackPage}</span>
+                          <ArrowUpRight className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => void toggleReviewHelpful(rev.id)}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                            isHelpfulVoted
+                              ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                              : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                          }`}
+                        >
+                          <ThumbsUp className="w-3.5 h-3.5" />
+                          <span>{i18n.portal.helpfulLabel}</span>
+                          <span className="font-mono-tabular font-bold">
+                            ({rev.helpfulCount})
+                          </span>
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )
+          ) : loading && tracksQueue.length === 0 ? (
+            /* ჩატვირთვის სკელეტონი */
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 animate-pulse">
+              {[1, 2, 3, 4].map((item) => (
+                <div
+                  key={item}
+                  className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-5 space-y-4"
+                >
+                  <div className="flex items-start gap-4">
+                    <div className="w-20 h-20 rounded-xl bg-zinc-800/80 shrink-0" />
+                    <div className="flex-1 space-y-2.5 pt-1">
+                      <div className="h-3.5 w-24 bg-zinc-800/80 rounded" />
+                      <div className="h-5 w-40 bg-zinc-800/80 rounded" />
+                      <div className="h-3.5 w-28 bg-zinc-800/80 rounded" />
                     </div>
-
-                    <p className="text-sm text-zinc-200 leading-relaxed">
-                      {rev.text}
-                    </p>
-
-                    <div className="flex items-center justify-between pt-2">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenTrack(rev.trackId)}
-                        className="inline-flex items-center gap-1 text-xs font-medium text-amber-400 hover:text-amber-300 cursor-pointer"
-                      >
-                        <span>{i18n.portal.openTrackPage}</span>
-                        <ArrowUpRight className="w-3.5 h-3.5" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => void toggleReviewHelpful(rev.id)}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                          isHelpfulVoted
-                            ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
-                            : 'bg-[#0B0F17] border-zinc-800 text-zinc-300 hover:border-zinc-700'
-                        }`}
-                      >
-                        <ThumbsUp className="w-3.5 h-3.5" />
-                        <span>{i18n.portal.helpfulLabel}</span>
-                        <span className="font-mono-tabular font-bold">
-                          ({rev.helpfulCount})
-                        </span>
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
+                  </div>
+                  <div className="pt-3.5 border-t border-zinc-800/80 flex justify-between">
+                    <div className="h-6 w-24 bg-zinc-800/80 rounded" />
+                    <div className="h-4 w-20 bg-zinc-800/80 rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : sortedTracks.length === 0 ? (
+            /* ცარიელი მდგომარეობა, როცა კატალოგში ტრეკები ჯერ არ არის */
+            <div className="border border-zinc-800/90 bg-[#111723] rounded-2xl p-10 text-center space-y-4">
+              <p className="text-sm md:text-base font-medium text-zinc-200">
+                კატალოგში ტრეკები ჯერ არ არის. წარადგინეთ პირველი რელიზი!
+              </p>
+              {onOpenSubmitModal && canPublishTrack ? (
+                <div>
+                  <button
+                    type="button"
+                    onClick={onOpenSubmitModal}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-xl transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{i18n.phrases.submitTrack}</span>
+                  </button>
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">
+                  {i18n.phrases.accessRestricted} · {i18n.phrases.expertsOnly}
+                </p>
+              )}
             </div>
           ) : (
             /* ტოპ 24 ტრეკის ბარათების ბადე */
@@ -500,6 +576,10 @@ export default function HomePage({
                           src={track.coverUrl || PRESET_COVERS.vinyl}
                           alt={track.title}
                           referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            e.currentTarget.onerror = null;
+                            e.currentTarget.src = PRESET_COVERS.vinyl;
+                          }}
                           className="w-full h-full object-cover"
                         />
                         <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-zinc-950/85 text-[11px] font-mono-tabular font-bold text-amber-400">
@@ -591,43 +671,53 @@ export default function HomePage({
               </span>
             </div>
 
-            <div className="divide-y divide-zinc-800/70">
-              {artists.slice(0, 6).map((art) => (
-                <div
-                  key={art.id}
-                  className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
-                >
-                  <button
-                    type="button"
-                    onClick={() => handleOpenArtist(art.id)}
-                    className="flex items-center gap-3 min-w-0 text-left group cursor-pointer"
+            {artists.length === 0 ? (
+              <p className="py-4 text-center text-xs text-zinc-400">
+                არტისტები ჯერ არ მოიძებნა
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-800/70">
+                {artists.slice(0, 6).map((art) => (
+                  <div
+                    key={art.id}
+                    className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
                   >
-                    <img
-                      src={art.avatarUrl || PRESET_COVERS.vinyl}
-                      alt={art.name}
-                      referrerPolicy="no-referrer"
-                      className="w-10 h-10 rounded-lg object-cover bg-zinc-900 border border-zinc-800 shrink-0"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-zinc-100 group-hover:text-amber-400 transition-colors truncate">
-                        {art.name}
-                      </p>
-                      <p className="text-xs text-zinc-400 truncate">
-                        {art.genres[0]}
-                      </p>
-                    </div>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenArtist(art.id)}
+                      className="flex items-center gap-3 min-w-0 text-left group cursor-pointer"
+                    >
+                      <img
+                        src={art.avatarUrl || PRESET_COVERS.vinyl}
+                        alt={art.name}
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          e.currentTarget.onerror = null;
+                          e.currentTarget.src = PRESET_COVERS.vinyl;
+                        }}
+                        className="w-10 h-10 rounded-lg object-cover bg-zinc-900 border border-zinc-800 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-zinc-100 group-hover:text-amber-400 transition-colors truncate">
+                          {art.name}
+                        </p>
+                        <p className="text-xs text-zinc-400 truncate">
+                          {art.genres[0]}
+                        </p>
+                      </div>
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => handleOpenArtist(art.id)}
-                    className="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0 cursor-pointer whitespace-nowrap"
-                  >
-                    {i18n.phrases.discography} →
-                  </button>
-                </div>
-              ))}
-            </div>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenArtist(art.id)}
+                      className="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0 cursor-pointer whitespace-nowrap"
+                    >
+                      {i18n.phrases.discography} →
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           {/* ტოპ კრიტიკოსები */}
@@ -642,45 +732,51 @@ export default function HomePage({
               <Users className="w-4 h-4 text-zinc-500" />
             </div>
 
-            <div className="divide-y divide-zinc-800/70">
-              {topCritics.slice(0, 5).map((critic, idx) => (
-                <div
-                  key={critic.uid}
-                  className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="text-xs font-mono-tabular font-bold text-amber-400 w-5 shrink-0">
-                      0{idx + 1}.
-                    </span>
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-zinc-100 truncate">
-                        {critic.displayName}
-                      </p>
-                      <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                        <span>{i18n.roles[critic.role]}</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-mono-tabular">
-                          ×{critic.voteWeight.toFixed(1)}
-                        </span>
+            {topCritics.length === 0 ? (
+              <p className="py-4 text-center text-xs text-zinc-400">
+                კრიტიკოსები ჯერ არ არიან
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-800/70">
+                {topCritics.slice(0, 5).map((critic, idx) => (
+                  <div
+                    key={critic.uid}
+                    className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-xs font-mono-tabular font-bold text-amber-400 w-5 shrink-0">
+                        0{idx + 1}.
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-zinc-100 truncate">
+                          {critic.displayName}
+                        </p>
+                        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                          <span>{i18n.roles[critic.role]}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono-tabular">
+                            ×{critic.voteWeight.toFixed(1)}
+                          </span>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="text-right shrink-0 text-xs">
-                    <span className="block font-mono-tabular font-bold text-zinc-200">
-                      {critic.helpfulVotesReceived}{' '}
-                      <span className="font-normal text-zinc-400">
-                        {i18n.portal.helpfulVotesTotal}
+                    <div className="text-right shrink-0 text-xs">
+                      <span className="block font-mono-tabular font-bold text-zinc-200">
+                        {critic.helpfulVotesReceived}{' '}
+                        <span className="font-normal text-zinc-400">
+                          {i18n.portal.helpfulVotesTotal}
+                        </span>
                       </span>
-                    </span>
-                    <span className="block font-mono-tabular text-zinc-500">
-                      {critic.reviewsCount} {i18n.portal.reviewsCountLabel} ·{' '}
-                      {critic.xp} XP
-                    </span>
+                      <span className="block font-mono-tabular text-zinc-500">
+                        {critic.reviewsCount} {i18n.portal.reviewsCountLabel} ·{' '}
+                        {critic.xp} XP
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </section>
 
           {/* ბოლო რეცენზიების სწრაფი ბლოკი */}
@@ -702,38 +798,44 @@ export default function HomePage({
                 </button>
               </div>
 
-              <div className="divide-y divide-zinc-800/70">
-                {reviews.slice(0, 3).map((rev) => (
-                  <div
-                    key={rev.id}
-                    className="py-3.5 first:pt-0 last:pb-0 space-y-1.5"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenTrack(rev.trackId)}
-                        className="text-xs font-semibold text-amber-400 hover:underline truncate cursor-pointer text-left"
-                      >
-                        {rev.trackArtist} — {rev.trackTitle}
-                      </button>
-                      <span className="font-mono-tabular text-xs font-bold text-zinc-100 shrink-0">
-                        {rev.totalScore.toFixed(1)}
-                      </span>
-                    </div>
+              {reviews.length === 0 ? (
+                <p className="py-4 text-center text-xs text-zinc-400">
+                  რეცენზიები ჯერ არ დაწერილა
+                </p>
+              ) : (
+                <div className="divide-y divide-zinc-800/70">
+                  {reviews.slice(0, 3).map((rev) => (
+                    <div
+                      key={rev.id}
+                      className="py-3.5 first:pt-0 last:pb-0 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenTrack(rev.trackId)}
+                          className="text-xs font-semibold text-amber-400 hover:underline truncate cursor-pointer text-left"
+                        >
+                          {rev.trackArtist} — {rev.trackTitle}
+                        </button>
+                        <span className="font-mono-tabular text-xs font-bold text-zinc-100 shrink-0">
+                          {rev.totalScore.toFixed(1)}
+                        </span>
+                      </div>
 
-                    <p className="text-xs text-zinc-300 line-clamp-2 leading-relaxed">
-                      {rev.text}
-                    </p>
+                      <p className="text-xs text-zinc-300 line-clamp-2 leading-relaxed">
+                        {rev.text}
+                      </p>
 
-                    <div className="flex items-center justify-between text-[11px] text-zinc-500 pt-0.5">
-                      <span>{rev.authorName}</span>
-                      <span className="font-mono-tabular">
-                        {i18n.portal.helpfulLabel}: {rev.helpfulCount}
-                      </span>
+                      <div className="flex items-center justify-between text-[11px] text-zinc-500 pt-0.5">
+                        <span>{rev.authorName}</span>
+                        <span className="font-mono-tabular">
+                          {i18n.portal.helpfulLabel}: {rev.helpfulCount}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </section>
           )}
         </aside>
