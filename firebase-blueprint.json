@@ -1,0 +1,339 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Public user profile with role, XP, and vote weight for the music review platform.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name shown in chat and reviews.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "avatarUrl": {
+          "type": "string",
+          "description": "URL to the user avatar image.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "role": {
+          "type": "string",
+          "description": "User role on the platform.",
+          "enum": ["viewer", "vip", "moderator", "expert", "streamer", "admin"]
+        },
+        "xp": {
+          "type": "number",
+          "description": "Experience points earned from active participation and accurate reviews."
+        },
+        "level": {
+          "type": "number",
+          "description": "Calculated user level based on XP."
+        },
+        "voteWeight": {
+          "type": "number",
+          "description": "Multiplier weight of the user's vote in community score calculation (e.g. 1.0 to 10.0)."
+        },
+        "reviewsCount": {
+          "type": "number",
+          "description": "Total number of track reviews submitted by the user."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the profile was last updated."
+        }
+      },
+      "required": ["uid", "displayName", "role", "xp", "voteWeight", "createdAt", "updatedAt"]
+    },
+    "CriteriaScores": {
+      "title": "CriteriaScores",
+      "description": "5-parameter evaluation matrix (1 to 10) for music tracks.",
+      "type": "object",
+      "properties": {
+        "lyrics": {
+          "type": "number",
+          "description": "Lyrics, rhymes, and imagery score (1-10)."
+        },
+        "flow": {
+          "type": "number",
+          "description": "Flow, rhythm, and structure score (1-10)."
+        },
+        "production": {
+          "type": "number",
+          "description": "Beat, mixing, and sound design score (1-10)."
+        },
+        "identity": {
+          "type": "number",
+          "description": "Artist charisma and uniqueness score (1-10)."
+        },
+        "vibe": {
+          "type": "number",
+          "description": "Overall atmosphere and replay value score (1-10)."
+        }
+      },
+      "required": ["lyrics", "flow", "production", "identity", "vibe"]
+    },
+    "Track": {
+      "title": "Track",
+      "description": "Music track submitted for live stream reaction and evaluation.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique track identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Track title.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "artist": {
+          "type": "string",
+          "description": "Artist or band name.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "artistId": {
+          "type": "string",
+          "description": "Normalized artist profile identifier.",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "coverUrl": {
+          "type": "string",
+          "description": "Album/track artwork URL.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "audioUrl": {
+          "type": "string",
+          "description": "Direct audio stream URL or platform link.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "sourceUrl": {
+          "type": "string",
+          "description": "Original platform URL (SoundCloud, YouTube, Spotify, etc.).",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "genre": {
+          "type": "string",
+          "description": "Musical genre tag.",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "duration": {
+          "type": "number",
+          "description": "Track duration in seconds."
+        },
+        "submittedBy": {
+          "type": "string",
+          "description": "UID of the user who submitted the track.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "submittedByName": {
+          "type": "string",
+          "description": "Display name of the submitter.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "isPriority": {
+          "type": "boolean",
+          "description": "Whether the track was submitted with priority/donation."
+        },
+        "donationAmount": {
+          "type": "number",
+          "description": "Donation amount attached to the submission."
+        },
+        "status": {
+          "type": "string",
+          "description": "Current lifecycle status of the track in the stream queue or catalog.",
+          "enum": ["pending", "in_queue", "queued", "on_air", "playing", "reviewing", "reviewed", "community_catalog", "rejected"]
+        },
+        "expertScore": {
+          "$ref": "#/entities/CriteriaScores",
+          "type": "object",
+          "description": "Aggregated or host/expert 5-parameter scores."
+        },
+        "expertTotalScore": {
+          "type": "number",
+          "description": "Calculated total/average score from experts (1-10 or 0-100)."
+        },
+        "communityScore": {
+          "$ref": "#/entities/CriteriaScores",
+          "type": "object",
+          "description": "Weighted average 5-parameter scores from the community."
+        },
+        "communityTotalScore": {
+          "type": "number",
+          "description": "Calculated weighted total/average score from the community."
+        },
+        "communityVotesCount": {
+          "type": "number",
+          "description": "Total number of community votes cast for this track."
+        },
+        "metaScore": {
+          "type": "number",
+          "description": "Combined final MetaScore blending expertScore and communityScore."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the track was submitted."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the track was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "artist",
+        "coverUrl",
+        "audioUrl",
+        "submittedBy",
+        "submittedByName",
+        "isPriority",
+        "status",
+        "communityVotesCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LiveSession": {
+      "title": "LiveSession",
+      "description": "Real-time stream state synchronized between host dashboard, viewers, and OBS browser overlay.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Session document ID (e.g., 'current').",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "isLive": {
+          "type": "boolean",
+          "description": "Whether the stream reaction session is currently active."
+        },
+        "streamStatus": {
+          "type": "string",
+          "description": "Current phase of the live reaction session.",
+          "enum": ["idle", "listening", "locked", "revealed"]
+        },
+        "activeTrackId": {
+          "type": "string",
+          "description": "ID of the currently active track in tracks collection (or empty string if none).",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "hostId": {
+          "type": "string",
+          "description": "UID of the streamer/host controlling the session.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Stream session title.",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "votingOpen": {
+          "type": "boolean",
+          "description": "Whether community voting is currently open for the active track."
+        },
+        "isPlaying": {
+          "type": "boolean",
+          "description": "Whether audio playback is currently running (for OBS sync)."
+        },
+        "playbackPosition": {
+          "type": "number",
+          "description": "Current playback position in seconds for OBS widget synchronization."
+        },
+        "showObsOverlay": {
+          "type": "boolean",
+          "description": "Whether the OBS overlay widget should be visible on stream."
+        },
+        "obsTheme": {
+          "type": "string",
+          "description": "Visual theme preset for the OBS browser overlay.",
+          "enum": ["dark", "neon", "minimal", "compact"]
+        },
+        "liveExpertDraft": {
+          "$ref": "#/entities/CriteriaScores",
+          "type": "object",
+          "description": "Real-time draft scores being adjusted by the host on stream."
+        },
+        "viewersCount": {
+          "type": "number",
+          "description": "Current number of active viewers in the session."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the last state transition."
+        }
+      },
+      "required": [
+        "id",
+        "isLive",
+        "streamStatus",
+        "activeTrackId",
+        "hostId",
+        "title",
+        "votingOpen",
+        "isPlaying",
+        "playbackPosition",
+        "showObsOverlay",
+        "obsTheme",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Public user profiles containing role, XP, and voteWeight."
+    },
+    "/tracks/{trackId}": {
+      "schema": { "$ref": "#/entities/Track" },
+      "description": "Submitted music tracks with expertScore, communityScore, metaScore, and queue status."
+    },
+    "/tracks/{trackId}/reviews/{reviewId}": {
+      "schema": "TrackReview",
+      "description": "Community reviews and 5-parameter evaluations for a specific track."
+    },
+    "/live_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/LiveSession" },
+      "description": "Real-time stream state for OBS overlay and viewer synchronization."
+    },
+    "/liveSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/LiveSession" },
+      "description": "Legacy alias for real-time stream state."
+    }
+  }
+}

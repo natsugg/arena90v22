@@ -1,0 +1,398 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 0. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Primitives
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'hardsize@mail.ru'
+      );
+    }
+
+    // =========================================================================
+    // Validation Blueprint: CriteriaScores (5 parameters, 1..10)
+    // =========================================================================
+    function isValidScoreValue(val) {
+      return val is number && val >= 1 && val <= 10;
+    }
+
+    function isValidCriteriaScores(scores) {
+      return scores is map
+        && scores.keys().hasAll(['lyrics', 'flow', 'production', 'identity', 'vibe'])
+        && scores.keys().hasOnly(['lyrics', 'flow', 'production', 'identity', 'vibe'])
+        && isValidScoreValue(scores.lyrics)
+        && isValidScoreValue(scores.flow)
+        && isValidScoreValue(scores.production)
+        && isValidScoreValue(scores.identity)
+        && isValidScoreValue(scores.vibe);
+    }
+
+    // =========================================================================
+    // Validation Blueprint: User (/users/{userId})
+    // =========================================================================
+    function isValidUser(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'xp', 'voteWeight', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'avatarUrl', 'role', 'xp', 'level', 'voteWeight', 'reviewsCount', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() >= 0 && data.avatarUrl.size() <= 500))
+        && data.role is string && data.role.size() <= 20 && data.role in ['viewer', 'vip', 'moderator', 'expert', 'streamer', 'admin']
+        && data.xp is number && data.xp >= 0 && data.xp <= 10000000
+        && (!('level' in data) || (data.level is number && data.level >= 1 && data.level <= 1000))
+        && data.voteWeight is number && data.voteWeight >= 0.1 && data.voteWeight <= 10.0
+        && (!('reviewsCount' in data) || (data.reviewsCount is number && data.reviewsCount >= 0 && data.reviewsCount <= 1000000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Validation Blueprint: Track (/tracks/{trackId})
+    // =========================================================================
+    function isValidTrack(data, trackId) {
+      return data.keys().hasAll([
+          'id', 'title', 'artist', 'coverUrl', 'audioUrl',
+          'submittedBy', 'submittedByName', 'isPriority',
+          'status', 'communityVotesCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl',
+          'genre', 'duration', 'submittedBy', 'submittedByName',
+          'isPriority', 'donationAmount', 'status',
+          'expertScore', 'expertTotalScore', 'communityScore', 'communityTotalScore',
+          'communityVotesCount', 'metaScore', 'createdAt', 'updatedAt'
+        ])
+        && data.id == trackId
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.artist is string && data.artist.size() >= 1 && data.artist.size() <= 120
+        && (!('artistId' in data) || (data.artistId is string && data.artistId.size() >= 0 && data.artistId.size() <= 128))
+        && data.coverUrl is string && data.coverUrl.size() >= 0 && data.coverUrl.size() <= 500
+        && data.audioUrl is string && data.audioUrl.size() >= 1 && data.audioUrl.size() <= 500
+        && (!('sourceUrl' in data) || (data.sourceUrl is string && data.sourceUrl.size() >= 0 && data.sourceUrl.size() <= 500))
+        && (!('genre' in data) || (data.genre is string && data.genre.size() >= 0 && data.genre.size() <= 60))
+        && (!('duration' in data) || (data.duration is number && data.duration >= 0 && data.duration <= 7200))
+        && isValidId(data.submittedBy)
+        && data.submittedByName is string && data.submittedByName.size() >= 1 && data.submittedByName.size() <= 80
+        && data.isPriority is bool
+        && (!('donationAmount' in data) || (data.donationAmount is number && data.donationAmount >= 0 && data.donationAmount <= 1000000))
+        && data.status is string && data.status.size() <= 20 && data.status in [
+          'pending', 'in_queue', 'queued', 'on_air', 'playing',
+          'reviewing', 'reviewed', 'community_catalog', 'rejected'
+        ]
+        && (!('expertScore' in data) || data.expertScore == null || isValidCriteriaScores(data.expertScore))
+        && (!('expertTotalScore' in data) || data.expertTotalScore == null || (data.expertTotalScore is number && data.expertTotalScore >= 1 && data.expertTotalScore <= 10))
+        && (!('communityScore' in data) || data.communityScore == null || isValidCriteriaScores(data.communityScore))
+        && (!('communityTotalScore' in data) || data.communityTotalScore == null || (data.communityTotalScore is number && data.communityTotalScore >= 1 && data.communityTotalScore <= 10))
+        && data.communityVotesCount is number && data.communityVotesCount >= 0 && data.communityVotesCount <= 1000000
+        && (!('metaScore' in data) || data.metaScore == null || (data.metaScore is number && data.metaScore >= 0 && data.metaScore <= 100))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Validation Blueprint: TrackReview (/tracks/{trackId}/reviews/{reviewId})
+    // =========================================================================
+    function isValidReview(data, trackId, reviewId) {
+      return data.keys().hasAll([
+          'id', 'trackId', 'authorId', 'authorName', 'authorRole',
+          'voteWeight', 'scores', 'totalScore', 'text', 'helpfulCount', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'trackId', 'authorId', 'authorName', 'authorRole',
+          'voteWeight', 'scores', 'totalScore', 'text', 'helpfulCount', 'createdAt'
+        ])
+        && data.id == reviewId
+        && isValidId(data.id)
+        && data.trackId == trackId
+        && isValidId(data.trackId)
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80
+        && data.authorRole is string && data.authorRole.size() <= 20 && data.authorRole in ['viewer', 'vip', 'moderator', 'expert', 'streamer', 'admin']
+        && data.voteWeight is number && data.voteWeight >= 0.1 && data.voteWeight <= 10.0
+        && isValidCriteriaScores(data.scores)
+        && data.totalScore is number && data.totalScore >= 1 && data.totalScore <= 10
+        && data.text is string && data.text.size() >= 100 && data.text.size() <= 3000
+        && data.helpfulCount is number && data.helpfulCount >= 0 && data.helpfulCount <= 1000000
+        && data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // Validation Blueprint: LiveSession (/live_sessions/{sessionId})
+    // =========================================================================
+    function isValidLiveSession(data, sessionId) {
+      return data.keys().hasAll([
+          'id', 'isLive', 'streamStatus', 'activeTrackId', 'hostId',
+          'title', 'votingOpen', 'isPlaying', 'playbackPosition',
+          'showObsOverlay', 'obsTheme', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'isLive', 'streamStatus', 'activeTrackId', 'hostId',
+          'title', 'votingOpen', 'isPlaying', 'playbackPosition',
+          'showObsOverlay', 'obsTheme', 'liveExpertDraft', 'viewersCount', 'updatedAt'
+        ])
+        && data.id == sessionId
+        && isValidId(data.id)
+        && data.isLive is bool
+        && data.streamStatus is string && data.streamStatus.size() <= 20 && data.streamStatus in ['idle', 'listening', 'locked', 'revealed', 'offline', 'starting', 'voting', 'results', 'paused']
+        && (data.activeTrackId == null || (data.activeTrackId is string && data.activeTrackId.size() >= 0 && data.activeTrackId.size() <= 128))
+        && isValidId(data.hostId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.votingOpen is bool
+        && data.isPlaying is bool
+        && data.playbackPosition is number && data.playbackPosition >= 0 && data.playbackPosition <= 86400
+        && data.showObsOverlay is bool
+        && data.obsTheme is string && data.obsTheme.size() <= 20 && data.obsTheme in ['dark', 'neon', 'minimal', 'compact']
+        && (!('liveExpertDraft' in data) || data.liveExpertDraft == null || isValidCriteriaScores(data.liveExpertDraft))
+        && (!('viewersCount' in data) || (data.viewersCount is number && data.viewersCount >= 0 && data.viewersCount <= 1000000))
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Rules: /admins/{adminId}
+    // =========================================================================
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+
+    // =========================================================================
+    // Collection Rules: /users/{userId}
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+
+      allow create: if isVerified()
+        && isValidId(userId)
+        && isValidUser(incoming(), userId)
+        && request.auth.uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (incoming().role == 'viewer' && incoming().xp == 0 && incoming().voteWeight == 1.0) ||
+          isAdmin()
+        );
+
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isValidUser(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Owner updates public profile display fields only (cannot self-promote role/xp/voteWeight)
+          (
+            request.auth.uid == userId
+            && incoming().role == existing().role
+            && incoming().xp == existing().xp
+            && incoming().voteWeight == existing().voteWeight
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'updatedAt'])
+          ) ||
+          // Action 2: Admin manages role, XP, level, and voteWeight
+          isAdmin()
+        );
+
+      allow delete: if isVerified() && isValidId(userId) && isAdmin();
+    }
+
+    // =========================================================================
+    // Collection Rules: /tracks/{trackId}
+    // =========================================================================
+    match /tracks/{trackId} {
+      // 1. Public read & list for all users (including guests and OBS) for active/catalog statuses
+      allow get: if isValidId(trackId);
+      allow list: if existing().status in [
+          'in_queue', 'on_air', 'reviewed', 'community_catalog',
+          'queued', 'playing', 'reviewing'
+        ] || (isSignedIn() && existing().submittedBy == request.auth.uid);
+
+      // 2. Track creation: regular verified users submit to queue/catalog; admins can create directly 'on_air' with initial fields
+      allow create: if isVerified()
+        && isValidId(trackId)
+        && isValidTrack(incoming(), trackId)
+        && incoming().submittedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (
+            incoming().status in ['pending', 'in_queue', 'community_catalog']
+            && incoming().communityVotesCount == 0
+            && (!('expertScore' in incoming()) || incoming().expertScore == null)
+            && (!('communityScore' in incoming()) || incoming().communityScore == null)
+            && (!('metaScore' in incoming()) || incoming().metaScore == null)
+            && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          ) ||
+          isAdmin()
+        );
+
+      // 3. Track update: submitter metadata edit, community rating recalculation on review, or admin/host control
+      allow update: if isVerified()
+        && isValidId(trackId)
+        && isValidTrack(incoming(), trackId)
+        && incoming().id == existing().id
+        && incoming().submittedBy == existing().submittedBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Submitter updates track metadata while still pending or in_queue
+          (
+            !(existing().status in ['reviewed', 'rejected'])
+            && request.auth.uid == existing().submittedBy
+            && existing().status in ['pending', 'in_queue']
+            && incoming().status in ['pending', 'in_queue', 'on_air']
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'artist', 'artistId', 'coverUrl', 'audioUrl', 'sourceUrl', 'genre', 'status', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: Community rating update upon submitting a review
+          (
+            existing().status in ['in_queue', 'on_air', 'reviewed', 'community_catalog', 'queued', 'playing', 'reviewing']
+            && incoming().communityVotesCount >= existing().communityVotesCount
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'communityScore', 'communityTotalScore', 'communityVotesCount', 'metaScore', 'updatedAt'
+            ])
+          ) ||
+          // Action 3: Admin / Host updates queue status and scores
+          isAdmin()
+        );
+
+      allow delete: if isVerified() && isValidId(trackId) && isAdmin();
+
+      // =======================================================================
+      // Subcollection Rules: /tracks/{trackId}/reviews/{reviewId}
+      // =======================================================================
+      match /reviews/{reviewId} {
+        // 4. Public read & list for all users; allow helpfulCount increment
+        allow get: if isValidId(trackId) && isValidId(reviewId);
+        allow list: if isValidId(trackId) || existing().trackId == trackId;
+
+        allow create: if isVerified()
+          && isValidId(trackId)
+          && isValidId(reviewId)
+          && isValidReview(incoming(), trackId, reviewId)
+          && incoming().authorId == request.auth.uid
+          && incoming().helpfulCount == 1
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/tracks/$(trackId));
+
+        allow update: if isVerified()
+          && isValidId(trackId)
+          && isValidId(reviewId)
+          && isValidReview(incoming(), trackId, reviewId)
+          && incoming().id == existing().id
+          && incoming().trackId == existing().trackId
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && (
+            (
+              incoming().diff(existing()).affectedKeys().hasOnly(['helpfulCount'])
+              && incoming().helpfulCount == existing().helpfulCount + 1
+            ) ||
+            isAdmin()
+          );
+
+        allow delete: if isVerified() && isValidId(trackId) && isValidId(reviewId) && isAdmin();
+      }
+    }
+
+    // =========================================================================
+    // Collection Rules: /live_sessions/{sessionId} & /liveSessions/{sessionId}
+    // =========================================================================
+    match /live_sessions/{sessionId} {
+      allow get: if isValidId(sessionId);
+      allow list: if isSignedIn() && existing().hostId == request.auth.uid;
+
+      allow create: if isVerified()
+        && isValidId(sessionId)
+        && isValidLiveSession(incoming(), sessionId)
+        && incoming().updatedAt == request.time
+        && (incoming().hostId == request.auth.uid || isAdmin())
+        && (exists(/databases/$(database)/documents/users/$(incoming().hostId)) || isAdmin());
+
+      // 5. Session host: remove strict hostId equality lock for admins so admin can always manage session
+      allow update: if isVerified()
+        && isValidId(sessionId)
+        && isValidLiveSession(incoming(), sessionId)
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time
+        && (
+          (
+            request.auth.uid == existing().hostId
+            && incoming().hostId == existing().hostId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'isLive', 'streamStatus', 'activeTrackId', 'title',
+              'votingOpen', 'isPlaying', 'playbackPosition',
+              'showObsOverlay', 'obsTheme', 'liveExpertDraft',
+              'viewersCount', 'updatedAt'
+            ])
+          ) ||
+          isAdmin()
+        );
+
+      allow delete: if isVerified() && isValidId(sessionId) && isAdmin();
+    }
+
+    match /liveSessions/{sessionId} {
+      allow get: if isValidId(sessionId);
+      allow list: if isSignedIn() && existing().hostId == request.auth.uid;
+
+      allow create: if isVerified()
+        && isValidId(sessionId)
+        && isValidLiveSession(incoming(), sessionId)
+        && incoming().updatedAt == request.time
+        && (incoming().hostId == request.auth.uid || isAdmin())
+        && (exists(/databases/$(database)/documents/users/$(incoming().hostId)) || isAdmin());
+
+      allow update: if isVerified()
+        && isValidId(sessionId)
+        && isValidLiveSession(incoming(), sessionId)
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time
+        && (
+          (
+            request.auth.uid == existing().hostId
+            && incoming().hostId == existing().hostId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'isLive', 'streamStatus', 'activeTrackId', 'title',
+              'votingOpen', 'isPlaying', 'playbackPosition',
+              'showObsOverlay', 'obsTheme', 'liveExpertDraft',
+              'viewersCount', 'updatedAt'
+            ])
+          ) ||
+          isAdmin()
+        );
+
+      allow delete: if isVerified() && isValidId(sessionId) && isAdmin();
+    }
+  }
+}

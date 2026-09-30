@@ -1,0 +1,6 @@
+{
+  "name": "SoundCheck Live — Музыкальные Реакции и Рецензии",
+  "description": "Стрим-платформа музыкальных реакций, экспертных оценок и рецензий в реальном времени с поддержкой OBS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
