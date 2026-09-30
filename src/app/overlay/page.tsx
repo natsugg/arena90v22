@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Disc3, Radio, Award } from 'lucide-react';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 import { i18n } from '../../lib/i18n';
 import {
-  useLiveSession,
   INITIAL_CRITERIA_SCORES,
+  INITIAL_LIVE_SESSION,
   PRESET_COVERS,
 } from '../../hooks/useLiveSession';
 import {
@@ -12,7 +14,9 @@ import {
   calculateAverageScore,
   calculateMetaScore,
   type CriteriaScores,
+  type LiveSession,
   type LiveStreamStatus,
+  type Track,
 } from '../../types';
 
 export interface OverlayPageProps {
@@ -21,12 +25,66 @@ export interface OverlayPageProps {
 }
 
 export default function OverlayPage({ embedded = false }: OverlayPageProps) {
-  const { session, activeTrack } = useLiveSession('current');
+  const [session, setSession] = useState<LiveSession>(() => INITIAL_LIVE_SESSION);
+  const [fallbackTrack, setFallbackTrack] = useState<Track | null>(null);
   const [imgError, setImgError] = useState(false);
+
+  // 1. სრულიად ავტონომიური, უპირობო პირდაპირი Firestore onSnapshot მოსმენა `live_sessions/current` დოკუმენტზე (ავტორიზაციის გარეშე, OBS CEF-ისთვის)
+  useEffect(() => {
+    const sessionRef = doc(db, 'live_sessions', 'current');
+    const unsubscribeSession = onSnapshot(
+      sessionRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data() as Omit<LiveSession, 'id'>;
+          setSession({
+            ...INITIAL_LIVE_SESSION,
+            ...data,
+            id: snapshot.id,
+            activeTrackId: data.activeTrackId || null,
+            activeTrackSnapshot: data.activeTrackSnapshot ?? null,
+            liveExpertDraft: data.liveExpertDraft ?? null,
+          });
+        }
+      },
+      (err) => {
+        console.error('OBS Overlay session snapshot error:', err);
+      }
+    );
+
+    return () => unsubscribeSession();
+  }, []);
+
+  // 2. დამხმარე (Fallback) მოსმენა `tracks/{activeTrackId}` დოკუმენტზე, თუ activeTrackSnapshot არ არის შევსებული
+  useEffect(() => {
+    const activeId = session?.activeTrackId;
+    if (!activeId || activeId.trim() === '') {
+      setFallbackTrack(null);
+      return;
+    }
+
+    const trackRef = doc(db, 'tracks', activeId);
+    const unsubscribeTrack = onSnapshot(
+      trackRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setFallbackTrack({
+            ...(snapshot.data() as Omit<Track, 'id'>),
+            id: snapshot.id,
+          });
+        }
+      },
+      () => {
+        // ignore fallback errors
+      }
+    );
+
+    return () => unsubscribeTrack();
+  }, [session?.activeTrackId]);
 
   useEffect(() => {
     setImgError(false);
-  }, [activeTrack?.coverUrl, session?.activeTrackSnapshot?.coverUrl]);
+  }, [session?.activeTrackSnapshot?.coverUrl, fallbackTrack?.coverUrl]);
 
   // OBS Browser Source-ისთვის სრულიად გამჭვირვალე ფონის უზრუნველყოფა
   useEffect(() => {
@@ -45,33 +103,43 @@ export default function OverlayPage({ embedded = false }: OverlayPageProps) {
   const status: LiveStreamStatus = session?.streamStatus ?? 'listening';
   const isRevealed = status === 'revealed';
 
+  // 3. პირდაპირი მიბმა სტრიმერის დრაფტზე (`session.liveExpertDraft`) ყოველ სნაპშოტზე
   const displayedScores: CriteriaScores =
-    (isRevealed && activeTrack?.expertScore
-      ? activeTrack.expertScore
-      : session?.liveExpertDraft) ??
-    activeTrack?.expertScore ??
+    session?.liveExpertDraft ??
+    session?.activeTrackSnapshot?.expertScore ??
+    fallbackTrack?.expertScore ??
     INITIAL_CRITERIA_SCORES;
 
   const averageScore = calculateAverageScore(displayedScores);
   const communityScore =
-    activeTrack?.communityTotalScore ??
     session?.activeTrackSnapshot?.communityTotalScore ??
+    fallbackTrack?.communityTotalScore ??
     8.6;
 
   const metaScore =
-    activeTrack?.metaScore ??
-    calculateMetaScore(displayedScores, activeTrack?.communityScore ?? null) ??
-    Math.round(averageScore * 10);
+    calculateMetaScore(
+      displayedScores,
+      fallbackTrack?.communityScore ?? {
+        lyrics: communityScore,
+        flow: communityScore,
+        production: communityScore,
+        identity: communityScore,
+        vibe: communityScore,
+      }
+    ) ?? Math.round(averageScore * 10);
 
+  // 4. ტრეკის სახელწოდება, არტისტი და გარეკანი პირველ რიგში მოდის `session.activeTrackSnapshot`-იდან (ფოლბექით `tracks/{activeTrackId}`-ზე)
   const trackTitle =
-    activeTrack?.title ??
-    session?.activeTrackSnapshot?.title ??
+    session?.activeTrackSnapshot?.title ||
+    fallbackTrack?.title ||
     i18n.ui.noActiveTrack;
   const trackArtist =
-    activeTrack?.artist ?? session?.activeTrackSnapshot?.artist ?? '—';
+    session?.activeTrackSnapshot?.artist ||
+    fallbackTrack?.artist ||
+    '—';
   const trackCover =
-    activeTrack?.coverUrl ??
-    session?.activeTrackSnapshot?.coverUrl ??
+    session?.activeTrackSnapshot?.coverUrl ||
+    fallbackTrack?.coverUrl ||
     PRESET_COVERS.vinyl;
 
   return (

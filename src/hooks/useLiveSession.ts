@@ -934,15 +934,10 @@ export function useLiveSession(
     };
   }, [session?.activeTrackId]);
 
-  // 1. Firestore real-time `onSnapshot` მოსმენა `live_sessions/{sessionId}` დოკუმენტზე
+  // 1. Firestore real-time `onSnapshot` მოსმენა `live_sessions/{sessionId}` დოკუმენტზე (უპირობოდ, OBS-ისა და ყველა კლიენტისთვის)
   useEffect(() => {
     if (!sessionId) {
       setSessionLoading(false);
-      return;
-    }
-
-    if (requireAuth && (!authReady || !isAuthenticated)) {
-      setSessionLoading(!authReady);
       return;
     }
 
@@ -961,6 +956,8 @@ export function useLiveSession(
             ...data,
             id: snapshot.id,
             activeTrackId: data.activeTrackId || null,
+            activeTrackSnapshot: data.activeTrackSnapshot ?? null,
+            liveExpertDraft: data.liveExpertDraft ?? null,
           };
           setSession(nextSession);
           setIsFirestoreSynced(true);
@@ -987,7 +984,7 @@ export function useLiveSession(
     return () => {
       unsubscribeSession();
     };
-  }, [sessionId, requireAuth, authReady, isAuthenticated]);
+  }, [sessionId]);
 
   // 1b. Firestore `tracks` კოლექციის რეალურ დროში მოსმენა (ღიაა ყველა მომხმარებლისთვის, სტუმრებისა და OBS-ის ჩათვლით)
   useEffect(() => {
@@ -1111,25 +1108,87 @@ export function useLiveSession(
     };
   }, [activeTrackId, requireAuth, authReady, isAuthenticated]);
 
+  const buildTrackSnapshot = useCallback(
+    (
+      trackCandidate: Track | null,
+      existingSnapshot?: LiveSession['activeTrackSnapshot']
+    ): LiveSession['activeTrackSnapshot'] => {
+      const resolvedTrack =
+        trackCandidate ??
+        tracksQueueRef.current.find(
+          (t) => t.id === (session?.activeTrackId ?? '')
+        ) ??
+        null;
+
+      if (resolvedTrack) {
+        return {
+          id: resolvedTrack.id,
+          title: (resolvedTrack.title || 'უსათაურო ტრეკი').slice(0, 120),
+          artist: (resolvedTrack.artist || 'უცნობი არტისტი').slice(0, 120),
+          coverUrl: (resolvedTrack.coverUrl || defaultCoverImg).slice(0, 500),
+          genre: (resolvedTrack.genre || 'ქართული სცენა').slice(0, 60),
+          expertScore: resolvedTrack.expertScore ?? null,
+          expertTotalScore: resolvedTrack.expertTotalScore ?? null,
+          communityTotalScore: resolvedTrack.communityTotalScore ?? 8.6,
+          communityVotesCount: resolvedTrack.communityVotesCount ?? 0,
+          metaScore: resolvedTrack.metaScore ?? null,
+        };
+      }
+
+      if (existingSnapshot) {
+        return {
+          id: existingSnapshot.id || 'track_tbilisi_night',
+          title: (existingSnapshot.title || 'უსათაურო ტრეკი').slice(0, 120),
+          artist: (existingSnapshot.artist || 'უცნობი არტისტი').slice(0, 120),
+          coverUrl: (existingSnapshot.coverUrl || defaultCoverImg).slice(
+            0,
+            500
+          ),
+          genre: (existingSnapshot.genre || 'ქართული სცენა').slice(0, 60),
+          expertScore: existingSnapshot.expertScore ?? null,
+          expertTotalScore: existingSnapshot.expertTotalScore ?? null,
+          communityTotalScore: existingSnapshot.communityTotalScore ?? 8.6,
+          communityVotesCount: existingSnapshot.communityVotesCount ?? 0,
+          metaScore: existingSnapshot.metaScore ?? null,
+        };
+      }
+
+      return INITIAL_LIVE_SESSION.activeTrackSnapshot ?? null;
+    },
+    [session?.activeTrackId]
+  );
+
   const syncSessionToFirestore = useCallback(
     async (nextSession: LiveSession) => {
-      if (!auth.currentUser) return;
       const sessionPath = `live_sessions/${sessionId}`;
+      const resolvedSnapshot = buildTrackSnapshot(
+        activeTrack,
+        nextSession.activeTrackSnapshot
+      );
+      const safeHostId =
+        (auth.currentUser?.uid || nextSession.hostId || 'streamer_host')
+          .replace(/[^a-zA-Z0-9_\-]/g, '_')
+          .slice(0, 128) || 'streamer_host';
+
       try {
         await setDoc(
           doc(db, 'live_sessions', sessionId),
           {
             id: sessionId,
-            isLive: nextSession.isLive,
+            isLive: Boolean(nextSession.isLive),
             streamStatus: nextSession.streamStatus,
-            activeTrackId: nextSession.activeTrackId ?? '',
-            hostId: auth.currentUser.uid,
-            title: nextSession.title,
-            votingOpen: nextSession.votingOpen,
-            isPlaying: nextSession.isPlaying,
-            playbackPosition: nextSession.playbackPosition,
-            showObsOverlay: nextSession.showObsOverlay,
-            obsTheme: nextSession.obsTheme,
+            activeTrackId:
+              nextSession.activeTrackId ?? resolvedSnapshot?.id ?? '',
+            activeTrackSnapshot: resolvedSnapshot,
+            hostId: safeHostId,
+            title: (
+              nextSession.title || 'ქართული რელიზების ლაივ-განხილვა'
+            ).slice(0, 140),
+            votingOpen: Boolean(nextSession.votingOpen),
+            isPlaying: Boolean(nextSession.isPlaying),
+            playbackPosition: nextSession.playbackPosition ?? 0,
+            showObsOverlay: Boolean(nextSession.showObsOverlay ?? true),
+            obsTheme: nextSession.obsTheme || 'dark',
             liveExpertDraft: nextSession.liveExpertDraft ?? null,
             viewersCount: nextSession.viewersCount ?? 1,
             updatedAt: serverTimestamp(),
@@ -1145,7 +1204,7 @@ export function useLiveSession(
         }
       }
     },
-    [sessionId]
+    [sessionId, activeTrack, buildTrackSnapshot]
   );
 
   const syncTrackToFirestore = useCallback(
@@ -1227,8 +1286,13 @@ export function useLiveSession(
   const updateDraftScores = useCallback(
     async (draft: CriteriaScores) => {
       const currentSession = session ?? INITIAL_LIVE_SESSION;
+      const snapshot = buildTrackSnapshot(
+        activeTrack,
+        currentSession.activeTrackSnapshot
+      );
       const nextSession: LiveSession = {
         ...currentSession,
+        activeTrackSnapshot: snapshot,
         liveExpertDraft: draft,
         updatedAt: Date.now(),
       };
@@ -1241,16 +1305,24 @@ export function useLiveSession(
         critics: topCritics,
       });
 
-      // 2. Запись в Firestore обернута в debounce (190 мс)
+      // 2. Запись в Firestore обернута в debounce (120 мс)
       if (draftDebounceRef.current) {
         clearTimeout(draftDebounceRef.current);
       }
       draftDebounceRef.current = setTimeout(() => {
         draftDebounceRef.current = null;
         void syncSessionToFirestore(nextSession);
-      }, 190);
+      }, 120);
     },
-    [session, tracksQueue, reviews, topCritics, syncSessionToFirestore]
+    [
+      session,
+      activeTrack,
+      tracksQueue,
+      reviews,
+      topCritics,
+      buildTrackSnapshot,
+      syncSessionToFirestore,
+    ]
   );
 
   const updateStreamStatus = useCallback(
@@ -1260,11 +1332,16 @@ export function useLiveSession(
         draftDebounceRef.current = null;
       }
       const currentSession = session ?? INITIAL_LIVE_SESSION;
+      const snapshot = buildTrackSnapshot(
+        activeTrack,
+        currentSession.activeTrackSnapshot
+      );
       const nextSession: LiveSession = {
         ...currentSession,
         streamStatus: status,
         isLive: status !== 'idle',
         votingOpen: status === 'listening',
+        activeTrackSnapshot: snapshot,
         updatedAt: Date.now(),
       };
       setSession(nextSession);
@@ -1276,7 +1353,15 @@ export function useLiveSession(
       });
       await syncSessionToFirestore(nextSession);
     },
-    [session, tracksQueue, reviews, topCritics, syncSessionToFirestore]
+    [
+      session,
+      activeTrack,
+      tracksQueue,
+      reviews,
+      topCritics,
+      buildTrackSnapshot,
+      syncSessionToFirestore,
+    ]
   );
 
   const lockInVerdict = useCallback(

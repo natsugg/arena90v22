@@ -149,6 +149,26 @@ service cloud.firestore {
     // =========================================================================
     // Validation Blueprint: LiveSession (/live_sessions/{sessionId})
     // =========================================================================
+    function isValidActiveTrackSnapshot(snap) {
+      return snap is map
+        && snap.keys().hasAll(['id', 'title', 'artist', 'coverUrl'])
+        && snap.keys().hasOnly([
+          'id', 'title', 'artist', 'coverUrl', 'genre',
+          'expertScore', 'expertTotalScore', 'communityTotalScore',
+          'communityVotesCount', 'metaScore'
+        ])
+        && isValidId(snap.id)
+        && snap.title is string && snap.title.size() >= 1 && snap.title.size() <= 120
+        && snap.artist is string && snap.artist.size() >= 1 && snap.artist.size() <= 120
+        && snap.coverUrl is string && snap.coverUrl.size() >= 0 && snap.coverUrl.size() <= 500
+        && (!('genre' in snap) || snap.genre == null || (snap.genre is string && snap.genre.size() >= 0 && snap.genre.size() <= 60))
+        && (!('expertScore' in snap) || snap.expertScore == null || isValidCriteriaScores(snap.expertScore))
+        && (!('expertTotalScore' in snap) || snap.expertTotalScore == null || (snap.expertTotalScore is number && snap.expertTotalScore >= 1 && snap.expertTotalScore <= 10))
+        && (!('communityTotalScore' in snap) || snap.communityTotalScore == null || (snap.communityTotalScore is number && snap.communityTotalScore >= 1 && snap.communityTotalScore <= 10))
+        && (!('communityVotesCount' in snap) || snap.communityVotesCount == null || (snap.communityVotesCount is number && snap.communityVotesCount >= 0 && snap.communityVotesCount <= 1000000))
+        && (!('metaScore' in snap) || snap.metaScore == null || (snap.metaScore is number && snap.metaScore >= 0 && snap.metaScore <= 100));
+    }
+
     function isValidLiveSession(data, sessionId) {
       return data.keys().hasAll([
           'id', 'isLive', 'streamStatus', 'activeTrackId', 'hostId',
@@ -156,8 +176,8 @@ service cloud.firestore {
           'showObsOverlay', 'obsTheme', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'isLive', 'streamStatus', 'activeTrackId', 'hostId',
-          'title', 'votingOpen', 'isPlaying', 'playbackPosition',
+          'id', 'isLive', 'streamStatus', 'activeTrackId', 'activeTrackSnapshot',
+          'hostId', 'title', 'votingOpen', 'isPlaying', 'playbackPosition',
           'showObsOverlay', 'obsTheme', 'liveExpertDraft', 'viewersCount', 'updatedAt'
         ])
         && data.id == sessionId
@@ -165,6 +185,7 @@ service cloud.firestore {
         && data.isLive is bool
         && data.streamStatus is string && data.streamStatus.size() <= 20 && data.streamStatus in ['idle', 'listening', 'locked', 'revealed', 'offline', 'starting', 'voting', 'results', 'paused']
         && (data.activeTrackId == null || (data.activeTrackId is string && data.activeTrackId.size() >= 0 && data.activeTrackId.size() <= 128))
+        && (!('activeTrackSnapshot' in data) || data.activeTrackSnapshot == null || isValidActiveTrackSnapshot(data.activeTrackSnapshot))
         && isValidId(data.hostId)
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
         && data.votingOpen is bool
@@ -329,33 +350,26 @@ service cloud.firestore {
     // Collection Rules: /live_sessions/{sessionId} & /liveSessions/{sessionId}
     // =========================================================================
     match /live_sessions/{sessionId} {
+      // Public read for OBS Browser Source (unauthenticated CEF) and all viewers
       allow get: if isValidId(sessionId);
-      allow list: if isSignedIn() && existing().hostId == request.auth.uid;
+      allow list: if isValidId(sessionId) || existing().isLive == true || existing().isLive == false;
 
-      allow create: if isVerified()
-        && isValidId(sessionId)
+      allow create: if isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
-        && incoming().updatedAt == request.time
-        && (incoming().hostId == request.auth.uid || isAdmin())
-        && (exists(/databases/$(database)/documents/users/$(incoming().hostId)) || isAdmin());
+        && incoming().updatedAt == request.time;
 
-      // 5. Session host: remove strict hostId equality lock for admins so admin can always manage session
-      allow update: if isVerified()
-        && isValidId(sessionId)
+      // 5. Session host / Studio control: allow updating activeTrackSnapshot, liveExpertDraft, and streamStatus
+      allow update: if isValidId(sessionId)
         && isValidLiveSession(incoming(), sessionId)
         && incoming().id == existing().id
         && incoming().updatedAt == request.time
         && (
-          (
-            request.auth.uid == existing().hostId
-            && incoming().hostId == existing().hostId
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'isLive', 'streamStatus', 'activeTrackId', 'title',
-              'votingOpen', 'isPlaying', 'playbackPosition',
-              'showObsOverlay', 'obsTheme', 'liveExpertDraft',
-              'viewersCount', 'updatedAt'
-            ])
-          ) ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'isLive', 'streamStatus', 'activeTrackId', 'activeTrackSnapshot',
+            'hostId', 'title', 'votingOpen', 'isPlaying', 'playbackPosition',
+            'showObsOverlay', 'obsTheme', 'liveExpertDraft',
+            'viewersCount', 'updatedAt'
+          ]) ||
           isAdmin()
         );
 
